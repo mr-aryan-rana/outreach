@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes what is **actually implemented**. For the full target platform (frontend, AI service, email service, campaigns), see `PROJECT.md` — those pieces do not exist in code yet. API key authentication (flat/global, not per-tenant) does exist — see "Platform hardening" below and `docs/API.md`.
+This document describes what is **actually implemented**. For the full target platform (frontend, per-tenant auth), see `PROJECT.md` — those pieces do not exist in code yet. API key authentication (flat/global, not per-tenant) exists — see "Platform hardening" below and `docs/API.md`. The AI service (`apps/ai`, Sprint 3) exists and generates drafts only — see "AI pipeline" below; it never sends email and has no campaign/automation logic. The email delivery service (`apps/email`, Sprint 4) exists — see "Email delivery pipeline" below; it never sends without an explicit human approval step and has no reply automation.
 
 ## Data flow
 
@@ -32,8 +32,88 @@ POST /api/v1/ingest/run {niche, platform}      (apps/backend)
           -> idempotency result stored in Redis if an Idempotency-Key was given
 
 GET /api/v1/creators?page=N              (apps/backend, paginated, indexed)
+GET /api/v1/creators/:id                 (apps/backend, full detail incl. bio/socialLinks -- used by apps/ai)
 GET /health, /ready, /metrics            (unversioned)
 ```
+
+## AI pipeline (apps/ai, Sprint 3)
+
+Standalone service, own process/port (`8004` by default), own Postgres schema (`ai`, isolated from the backend's `public` schema -- see `docs/DATABASE.md` "AI schema isolation"). Never sends email, never touches `apps/backend`'s tables directly.
+
+```
+POST /api/v1/ai/summary {creatorId}                              (apps/ai)
+  │  [rate limiter -> API key auth -> zod validation]
+  ├─ 1. GET apps/backend /api/v1/creators/:id  -> {bio, socialLinks, niche, ...}
+  └─ 2. Creator Summary   (LLM call, prompt: prompts/creator-summary/v1.md)
+          -> upserts creator_summaries, records ai_generations row
+
+POST /api/v1/ai/brand-fit {creatorId, brand}                     (apps/ai)
+  ├─ reuse stored Creator Summary if present, else run stage 1 above
+  ├─ 2. Brand Analysis     (LLM call)
+  ├─ 3. Creator Analysis   (LLM call, uses stages 1+2's output)
+  └─ 4. Brand Fit Score    (LLM call, uses stages 1-3's output; parses "Score: 0.NN")
+
+POST /api/v1/ai/draft {creatorId, brand}                         (apps/ai)
+  ├─ stages 1-4 above (self-contained -- brand info isn't cached between
+  │   requests, so /draft re-derives brand fit rather than requiring a prior
+  │   /brand-fit call; see docs/API.md for the cost trade-off this implies)
+  ├─ 5. Subject Generation (LLM call)
+  ├─ 6. Email Draft        (LLM call)
+  ├─ 7. Quality Review     (LLM call, spam-risk/quality check on the draft)
+  └─ 8. Save Draft         -> draft_emails row, status="draft" always
+
+GET /api/v1/ai/jobs/:id    (apps/ai, full job + all its ai_generations rows)
+GET /health, /ready, /metrics   (apps/ai, unversioned)
+```
+
+Every LLM call (`apps/ai/src/services/pipeline.ts` `runStage()`) goes through the same choke point: resolve the versioned prompt (`prompts/<name>/v<N>.md`, never hardcoded -- `apps/ai/src/prompts/`), call `generateWithFallback()` (retry -> circuit breaker -> timeout on the primary provider; falls back to a second configured provider on any failure, including a missing API key), then record one `ai_generations` row (model, provider, prompt version, latency, tokens, estimated cost) and update the relevant Prometheus metrics. See `docs/API.md` "AI Service" for the full endpoint reference and provider-adapter design.
+
+## Email delivery pipeline (apps/email, Sprint 4)
+
+Standalone service, own Postgres schema (`email`, isolated from both `public` and `ai` -- see `docs/DATABASE.md` "Email schema isolation"). Unlike `apps/backend`/`apps/ai`, this service runs as **two processes**: an API process (`src/server.ts`, port `8005` by default) that only ever *enqueues* work, and a separate worker process (`src/queue/runWorker.ts`) that is the only code path that calls a provider's `send()`. Never sends an AI-generated draft automatically, never generates or approves its own campaigns, never inspects an inbox for replies.
+
+```
+POST /api/v1/campaigns {name, senderProfileId, recipients[]}    (apps/email API)
+  │  [rate limiter -> API key auth -> zod validation]
+  ├─ dedupe input recipient list (in-memory, before any DB write)
+  ├─ check suppression_list for each recipient email
+  └─ create campaign (status="pending_review") + campaign_recipients
+       (status="pending" or "suppressed" per the check above)
+       -- nothing has been sent; this call only records intent
+
+POST /api/v1/campaigns/:id/approve {approvedBy}                 (apps/email API)
+  └─ pending_review -> approved   [the human approval gate --
+       services/campaignService.ts refuses every other status]
+
+POST /api/v1/campaigns/:id/send                                 (apps/email API)
+  ├─ refuses (409) unless status === "approved"
+  ├─ approved -> queued
+  └─ for each "pending" recipient, in creation order:
+       enqueueSend(recipientId, {delayMs, priority})   -> BullMQ EMAIL_SEND_QUEUE
+       (delay/priority spread per EMAIL_DELAY_MIN/MAX + MAX_EMAILS_PER_HOUR)
+       campaign_recipient.status -> "queued"
+
+  ⋯ separately-running worker process (src/queue/worker.ts) ⋯
+
+BullMQ job picked up  -> processSendJob(recipientId)             (apps/email worker)
+  ├─ re-check campaign.status still in {approved, queued, sending} -- refuse+fail otherwise
+  ├─ re-check suppression_list again (state may have changed since enqueue)
+  ├─ GET apps/ai /api/v1/ai/drafts/:draftEmailId  -> {subject, body}
+  ├─ sendViaProvider(senderProfile.provider, {...})  -> provider adapter (mock/smtp/resend/ses/sendgrid)
+  ├─ on success: campaign_recipient.status="sent", email_provider_logs row, email_events "sent" row
+  ├─ on failure: email_provider_logs row (status="error"), rethrow -> BullMQ retry/backoff
+  └─ on final exhausted retry: handleJobFailed -> EMAIL_SEND_DLQ + campaign_recipient.status="failed"
+
+POST /api/v1/webhooks/{resend,sendgrid,ses}                     (apps/email API)
+  └─ provider delivery event -> matched to campaign_recipient via providerMessageId
+       -> email_events row + campaign_recipient.status updated
+       -> "bounced" additionally upserts suppression_list
+
+GET /api/v1/campaigns/:id/status, /email-events, /dashboard/*   (apps/email API, read-only)
+GET /health, /ready, /metrics                                   (apps/email, unversioned)
+```
+
+Provider adapters (`apps/email/src/providers/`) mirror `apps/ai`'s pattern exactly: a minimal interface (`send()`), a `registry.ts` resolving by name, one file per provider, and a `MockEmailProvider` default that makes zero network calls -- used for every automated test and all live verification performed in this repo. See `docs/API.md` "Email Delivery Service" for the full endpoint reference, and `docs/SECURITY.md` for the webhook-authentication gap and the sending-without-approval prevention this pipeline is built around.
 
 ## Resilience layer
 
@@ -68,9 +148,11 @@ When a breaker is open, the call fails immediately with `BrokenCircuitError` ins
 | `apps/python/extractor` | Fetch a given URL, extract email/social/bio from the real page | No DB writes |
 | `apps/python/validator` | Syntax + MX + disposable-domain check, confidence score | No DB writes, never fabricates data |
 | `apps/backend` | All business logic, Postgres, Redis, API, orchestration | Never runs its own search/scrape logic — delegates to the Python services |
+| `apps/ai` | Creator summaries, brand-fit analysis, email draft generation via LLM providers | Never sends email, never touches `apps/backend`'s tables directly (reads creator data over HTTP), no campaign/automation logic |
+| `apps/email` | Campaign/recipient management, approval-gated queueing, provider-adapter sending, delivery event tracking, suppression | Never auto-sends a draft, never approves its own campaigns, never automates replies, never generates AI content (reads drafts from `apps/ai` over HTTP) |
 
-This split matches PROJECT.md §7 exactly: Python services are stateless and read-only; the Node backend owns all persistence and business rules.
+This split matches PROJECT.md §7 exactly: Python services are stateless and read-only; the Node backend owns all persistence and business rules; `apps/ai` owns only its own AI-specific tables (`docs/DATABASE.md` "AI schema isolation") and reaches creator data through the backend's API, never its database; `apps/email` owns only its own delivery-specific tables and reaches draft content through `apps/ai`'s API, never its database.
 
 ## Explicitly not built yet
 
-AI personalization, email-sending/SMTP, campaigns, rate-limited daily sending, BullMQ queue, Next.js frontend, per-tenant/scoped auth (today's API keys are flat/global). Do not assume these exist when reasoning about the system.
+Next.js frontend, per-tenant/scoped auth (today's API keys are flat/global), automatic mass sending (`apps/email` requires per-campaign human approval for every send, by design -- see PROJECT.md's non-goals), reply automation (replies are marked manually via `POST /campaigns/:id/recipients/:recipientId/mark-replied`, never detected/acted on automatically), a "sweep completed campaigns" job (`campaign.status` doesn't automatically reach `"completed"` -- see `DEPLOYMENT.md` "Known operational limits"), per-provider webhook HMAC signature verification (`docs/SECURITY.md` "Webhook authentication"), SES/SNS bounce event parsing (`docs/API.md`). `apps/backend`'s ingest pipeline and `apps/ai`'s pipeline stages both still run synchronously within the request, not via a queue -- `apps/email` is the only service with a queue (BullMQ) so far. Do not assume any of the above exists when reasoning about the system. AI personalization (`apps/ai`) and email delivery (`apps/email`) are now both implemented -- see "AI pipeline" and "Email delivery pipeline" above.

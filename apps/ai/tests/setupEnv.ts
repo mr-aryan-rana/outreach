@@ -1,0 +1,9 @@
+process.env.AI_DATABASE_URL ??= "postgresql://makeable:makeable@localhost:5432/makeable_ai_test?schema=ai";
+process.env.AI_DIRECT_URL ??= "postgresql://makeable:makeable@localhost:5432/makeable_ai_test?schema=ai";
+process.env.REDIS_URL ??= "redis://localhost:6379";
+process.env.LOG_LEVEL ??= "silent";
+process.env.AI_API_KEYS ??= "test-ai-api-key";
+process.env.BACKEND_URL ??= "http://localhost:4000";
+process.env.BACKEND_API_KEY ??= "test-backend-api-key";
+process.env.AI_PRIMARY_PROVIDER ??= "mock";
+process.env.AI_FALLBACK_PROVIDER ??= "mock";

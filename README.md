@@ -1,8 +1,6 @@
-# MakeAble — Creator Discovery Slice
+# MakeAble — Creator Discovery + AI Drafting Slice
 
-This repo currently implements the **first vertical slice** of the MakeAble platform described in `PROJECT.md`: **Search → Extract → Validate → Store**, for discovering creators and their publicly listed business emails from official profile/website pages.
-
-AI personalization, email sending, campaigns, and the frontend are **not implemented yet** — see `PROJECT.md` for the full intended platform and `docs/ARCHITECTURE.md` for what's built so far.
+This repo implements the **Search → Extract → Validate → Store** pipeline plus **AI-generated outreach drafts** (creator summary, brand fit, subject/email/quality review) from `PROJECT.md`. Email sending, campaigns, and the frontend are **not implemented yet** — `apps/ai` saves drafts only, it never sends anything. See `PROJECT.md` for the full intended platform and `docs/ARCHITECTURE.md` for what's built so far.
 
 ## Architecture
 
@@ -10,6 +8,11 @@ AI personalization, email sending, campaigns, and the frontend are **not impleme
 apps/backend      Node + TypeScript + Express + Prisma
                    owns Postgres + Redis, exposes the API, orchestrates the
                    search -> extract -> validate pipeline
+
+apps/ai            Node + TypeScript + Express + Prisma, standalone service
+                   (own port, own Postgres schema) -- creator summary, brand
+                   fit, email draft generation via OpenAI/Anthropic/Gemini.
+                   Drafts only, never sends email. See docs/API.md "AI Service".
 
 apps/python/search      FastAPI service: finds candidate creator profile/website URLs
 apps/python/extractor   FastAPI service: visits a URL, extracts email/social/bio
@@ -58,6 +61,16 @@ npm run dev
 cd apps/python/search      && pip install -r requirements.txt && uvicorn main:app --port 8001
 cd apps/python/extractor   && pip install -r requirements.txt && uvicorn main:app --port 8002
 cd apps/python/validator   && pip install -r requirements.txt && uvicorn main:app --port 8003
+
+# AI service (optional -- only needed for /ai/* endpoints)
+cd apps/ai
+cp .env.example .env   # AI_DATABASE_URL/AI_DIRECT_URL: same Supabase project as the backend,
+                        # `&schema=ai` isolates its tables -- see docs/DATABASE.md.
+                        # At least one of OPENAI_API_KEY/ANTHROPIC_API_KEY/GEMINI_API_KEY,
+                        # or set AI_PRIMARY_PROVIDER=mock for a zero-cost local/CI run.
+npm install
+npx prisma migrate deploy
+npm run dev   # port 8004
 ```
 
 ## Running the pipeline
@@ -86,9 +99,19 @@ curl http://localhost:4000/ready     # readiness: Postgres, Redis, all three Pyt
 curl http://localhost:4000/metrics   # Prometheus metrics
 ```
 
+## Running the AI pipeline
+
+```bash
+curl -X POST http://localhost:8004/api/v1/ai/draft \
+  -H "Content-Type: application/json" -H "X-API-Key: <one of your AI_API_KEYS>" \
+  -d '{"creatorId": "<uuid from GET /api/v1/creators>", "brand": {"name": "Acme", "description": "Widgets."}}'
+```
+
+Runs the full pipeline (creator summary -> brand analysis -> creator analysis -> brand fit score -> subject -> email draft -> quality review -> save) and returns a saved draft — see `docs/API.md` "AI Service" for `/summary` and `/brand-fit` (partial-pipeline endpoints) and `GET /ai/jobs/:id`.
+
 ## Testing
 
-See `docs/TESTING.md`. Quick version: `npm test` in `apps/backend` runs everything against `ioredis-mock` (no live Redis/Postgres required); real-cloud integration tests are opt-in via `RUN_INTEGRATION_TESTS=true` and never auto-load any `.env` file.
+See `docs/TESTING.md`. Quick version: `npm test` in `apps/backend` (and, separately, in `apps/ai`) runs everything against mocks (`ioredis-mock`, a deterministic zero-cost `MockProvider` for LLM calls — no live Redis/Postgres/AI-provider credentials required); real-cloud integration tests are opt-in via `RUN_INTEGRATION_TESTS=true` and never auto-load any `.env` file.
 
 ## CI
 

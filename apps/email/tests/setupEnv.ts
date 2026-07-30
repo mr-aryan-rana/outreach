@@ -1,0 +1,10 @@
+process.env.EMAIL_DATABASE_URL ??= "postgresql://makeable:makeable@localhost:5432/makeable_email_test?schema=email";
+process.env.EMAIL_DIRECT_URL ??= "postgresql://makeable:makeable@localhost:5432/makeable_email_test?schema=email";
+process.env.REDIS_URL ??= "redis://localhost:6379";
+process.env.LOG_LEVEL ??= "silent";
+process.env.EMAIL_API_KEYS ??= "test-email-api-key";
+process.env.AI_SERVICE_URL ??= "http://localhost:8004";
+process.env.AI_SERVICE_API_KEY ??= "test-ai-service-key";
+process.env.BACKEND_URL ??= "http://localhost:3000";
+process.env.BACKEND_API_KEY ??= "test-backend-key";
+process.env.EMAIL_QUEUE_MAX_ATTEMPTS ??= "3";

@@ -121,6 +121,8 @@ export function buildIngestRouter(duplicateChecker: DuplicateChecker, pipeline: 
             platform,
             niche,
             websiteUrl: url,
+            bio: extracted.bio || null,
+            socialLinks: extracted.social_links,
             emails: {
               create: {
                 address: extracted.email,

@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Same physical Postgres database as apps/backend, different schema ("ai",
+// set via ?schema=ai on AI_DATABASE_URL/AI_DIRECT_URL) -- keeps this
+// service's tables and its own _prisma_migrations history fully isolated
+// from the backend's "public" schema without needing a second database.
+// See docs/DATABASE.md "AI schema isolation".
+datasource db {
+  provider  = "postgresql"
+  url       = env("AI_DATABASE_URL")
+  directUrl = env("AI_DIRECT_URL")
+}
+
+// A named, reusable prompt (e.g. "creator-summary"). The template itself is
+// never hardcoded in application code -- see src/prompts/promptLoader.ts,
+// which reads the canonical text from prompts/<name>/v<N>.md and this table
+// only tracks *which* versions exist and which is currently active, for
+// audit/traceability (ai_generations.promptVersionId).
+model PromptTemplate {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  versions PromptVersion[]
+
+  @@map("prompt_templates")
+}
+
+model PromptVersion {
+  id         String   @id @default(uuid())
+  templateId String
+  template   PromptTemplate @relation(fields: [templateId], references: [id])
+  version    Int
+  // Raw prompt text as authored in the file, including {{variable}} placeholders.
+  content    String
+  variables  String[]
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  generations AiGeneration[]
+
+  @@unique([templateId, version])
+  @@index([templateId, isActive])
+  @@map("prompt_versions")
+}
+
+// One row per pipeline invocation (a call to /summary, /brand-fit, or
+// /draft). Synchronous today (no queue infra exists yet -- see
+// docs/ARCHITECTURE.md "Explicitly not built yet"), but modeled as a job
+// from the start so GET /jobs/:id and the audit trail work the same way
+// once real async processing lands.
+model AiJob {
+  id          String    @id @default(uuid())
+  creatorId   String
+  jobType     String // "summary" | "brand_fit" | "draft"
+  status      String // "pending" | "processing" | "completed" | "failed"
+  input       Json
+  result      Json?
+  error       String?
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  generations AiGeneration[]
+
+  @@index([creatorId])
+  @@index([status])
+  @@map("ai_jobs")
+}
+
+// One row per individual LLM call within a job (a job may span multiple
+// generations -- e.g. /draft makes 3: subject, body, quality review).
+model AiGeneration {
+  id                String   @id @default(uuid())
+  jobId             String
+  job               AiJob    @relation(fields: [jobId], references: [id])
+  stage             String // "creator_summary" | "brand_analysis" | "creator_analysis" | "brand_fit_score" | "subject_generation" | "email_draft" | "quality_review"
+  provider          String // "openai" | "anthropic" | "gemini" | "mock"
+  model             String
+  promptVersionId   String?
+  promptVersion     PromptVersion? @relation(fields: [promptVersionId], references: [id])
+  latencyMs         Int
+  promptTokens      Int?
+  completionTokens  Int?
+  totalTokens       Int?
+  estimatedCostUsd  Float?
+  usedFallback      Boolean  @default(false)
+  output            Json
+  createdAt         DateTime @default(now())
+
+  @@index([jobId])
+  @@index([stage])
+  @@index([createdAt])
+  @@map("ai_generations")
+}
+
+// Latest summary per creator (upserted -- re-running /summary for the same
+// creator replaces it, it doesn't accumulate history; ai_generations is the
+// historical audit trail if that's ever needed).
+model CreatorSummary {
+  id           String   @id @default(uuid())
+  creatorId    String   @unique
+  summary      String
+  keyThemes    String[]
+  generationId String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("creator_summaries")
+}
+
+// Draft only -- never sent. status is always "draft" today; the column
+// exists so a future (out-of-scope-for-Sprint-3) review/approval workflow
+// doesn't need a schema migration to add it.
+model DraftEmail {
+  id            String   @id @default(uuid())
+  creatorId     String
+  jobId         String?
+  subject       String
+  body          String
+  brandFitScore Float?
+  qualityScore  Float?
+  qualityNotes  String?
+  status        String   @default("draft")
+  createdAt     DateTime @default(now())
+
+  @@index([creatorId])
+  @@index([createdAt])
+  @@map("draft_emails")
+}

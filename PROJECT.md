@@ -168,6 +168,8 @@ Docker
 
 /scripts
 
+**Implementation note (Sprint 3):** the AI service was built at `apps/ai` (Node/TypeScript, standalone Express service), a sibling of `apps/backend`/`apps/python` — not nested under `apps/python` as this section's original layout implies. Deliberate: it reuses the hardened auth/rate-limiting/resilience/logging/Prisma patterns already proven in `apps/backend` rather than re-implementing them in Python, and its provider SDKs (OpenAI, Anthropic, Gemini) are equally mature in Node. See `docs/ARCHITECTURE.md` "AI pipeline" for the actual structure.
+
 ---
 
 # 7. Service Responsibilities
@@ -515,6 +517,8 @@ Reject low confidence emails.
 ---
 
 # 15. AI Rules
+
+**Implementation status (Sprint 3):** `apps/ai` implements creator summary, brand analysis, brand fit scoring, subject generation, email drafting, and quality review — draft generation only. It never sends email and has no campaign/automation logic; every rule below is enforced structurally (drafts save with `status: "draft"` and there is no SMTP/email client anywhere in the service to call even if a bug tried). See `docs/API.md` "AI Service" and `docs/ARCHITECTURE.md` "AI pipeline" for the implemented design.
 
 AI may
 

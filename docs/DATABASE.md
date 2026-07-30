@@ -13,6 +13,8 @@ Postgres is the source of truth (`apps/backend/prisma/schema.prisma`). Redis is 
 | `niche` | indexed, and composite-indexed with `platform` (the common `GET /creators` filter combination) |
 | `websiteUrl` | indexed, unique when present |
 | `instagram`, `youtube`, `tiktok` | indexed, nullable |
+| `bio` | nullable. Extracted by `apps/python/extractor` but discarded before this column existed (Sprint 3 migration `20260731000000_add_creator_bio_social_links`) -- existing rows ingested before that migration have no bio until re-ingested. Consumed by `apps/ai` for creator summaries. |
+| `socialLinks` | `text[]`, default `{}`. Same migration/history as `bio`. |
 | `createdAt` | indexed (list endpoint orders by it) |
 | `updatedAt` | |
 
@@ -35,6 +37,38 @@ Postgres is the source of truth (`apps/backend/prisma/schema.prisma`). Redis is 
 | `checkedAt` | indexed (supports a future "revalidate stale entries" query) |
 
 Tables in PROJECT.md not yet needed (`campaigns`, `email_logs`) are deferred until the email-sending slice.
+
+## AI schema isolation (apps/ai, Sprint 3)
+
+`apps/ai` owns 6 tables in a **separate Postgres schema** named `ai` (`CREATE SCHEMA ai`), inside the same physical Supabase database `apps/backend` uses -- not a separate database, not a separate Supabase project. This keeps the AI tables (and their own `_prisma_migrations` history) fully isolated from the backend's `public` schema without needing new infrastructure: two independent Prisma projects can't have their migration histories collide if they never share a schema.
+
+Set via `?schema=ai` on `AI_DATABASE_URL`/`AI_DIRECT_URL` (`apps/ai/prisma/schema.prisma`) -- both otherwise point at the exact same host/pooler/credentials as the backend's `DATABASE_URL`/`DIRECT_URL` (pooled port `6543` for runtime, direct port `5432` for migrations -- same pgbouncer rule as `apps/backend`, see "Connection pooling" below).
+
+`apps/ai` never queries `Creator`/`Email`/`ValidationResult` directly (no Prisma relation crosses the schema boundary) -- it fetches creator content over HTTP from `apps/backend`'s own `GET /api/v1/creators/:id`, preserving the "each service owns its own tables" boundary from `docs/ARCHITECTURE.md`.
+
+| table | purpose |
+|---|---|
+| `prompt_templates` | one row per named prompt (e.g. `creator-summary`) |
+| `prompt_versions` | one row per version of a template; `content`/`variables` mirror the file at `apps/ai/prompts/<name>/v<N>.md` (files are the source of truth, this table is the audit/version registry -- see `docs/API.md` "Provider adapters") |
+| `ai_jobs` | one row per pipeline invocation (`/summary`, `/brand-fit`, `/draft`); `status`, `input`, `result`/`error`, timestamps |
+| `ai_generations` | one row per individual LLM call within a job -- `model`, `provider`, `promptVersionId`, `latencyMs`, `promptTokens`/`completionTokens`/`totalTokens`, `estimatedCostUsd`, `usedFallback`, `createdAt` |
+| `creator_summaries` | latest summary per creator (`creatorId` unique -- upserted, not accumulated; `ai_generations` is the historical record if that's ever needed) |
+| `draft_emails` | saved drafts, `status` always `"draft"` -- no code path in this service changes it, and there is no SMTP/email client anywhere in `apps/ai` for it to call even if it tried |
+
+## Email schema isolation (apps/email, Sprint 4)
+
+Same pattern again: `apps/email` owns 6 tables in a third Postgres schema (`email`, set via `?schema=email` on `EMAIL_DATABASE_URL`/`EMAIL_DIRECT_URL`), same physical Supabase database, own isolated `_prisma_migrations` history. Now three services, three schemas (`public`/`ai`/`email`), one database -- see "AI schema isolation" above for why this scales cleanly (each service's migration history is independent by construction, not by convention).
+
+`apps/email` never queries `apps/ai`'s or `apps/backend`'s tables directly -- it fetches draft content from `apps/ai`'s `GET /api/v1/ai/drafts/:id` and stores only `creatorId`/`draftEmailId` by value (no cross-schema Prisma relation), the same boundary `apps/ai` itself respects toward `apps/backend`.
+
+| table | purpose |
+|---|---|
+| `sender_profiles` | a configured "From" identity + which provider adapter sends on its behalf (`mock`\|`smtp`\|`resend`\|`ses`\|`sendgrid`) + SPF/DKIM/DMARC verification flags |
+| `campaigns` | one row per campaign; `status` is the state machine (`pending_review` -> `approved` -> `queued` -> `sending` -> `completed`) -- see `docs/ARCHITECTURE.md` "Email delivery pipeline" for the guarded transitions |
+| `campaign_recipients` | one row per (campaign, recipient email) -- `@@unique([campaignId, email])` enforces "one active send per recipient per campaign" at the database level, not just in application code |
+| `email_events` | the business-level status timeline per recipient (queued/sent/delivered/deferred/bounced/opened/clicked/replied/failed) |
+| `email_provider_logs` | the raw provider request/response audit log per send attempt -- distinct from `email_events`; never stores provider API keys/secrets |
+| `suppression_list` | global, cross-campaign; checked before every enqueue and again immediately before every send. Not one of the 5 tables literally named in the Sprint 4 spec, but required by its own "Respect suppression lists" rule -- same "add what the rules structurally require" precedent as `apps/backend`'s `bio`/`socialLinks` columns (Sprint 3). |
 
 ## Rules
 
@@ -65,6 +99,8 @@ For a single long-running Node process (this app's deployment model — not serv
 
 **Confirmed live during RC1 load testing**: pointing `DATABASE_URL` at the *direct* connection (port `5432`) instead of the pooled one reproduces real `FATAL: max clients reached in session mode - max clients are limited to pool_size: 15` errors at only 100 concurrent requests — that 15-connection ceiling is per-project, so it's shared with every other application using the same Supabase project, not exclusive to this backend. Always use the port-`6543` `?pgbouncer=true` URL for `DATABASE_URL` at runtime; reserve the direct port-`5432` URL for `DIRECT_URL` (migrations only). Getting this backwards is a real, reproducible production incident waiting to happen the first time traffic exceeds ~15 concurrent DB-touching requests, not a theoretical risk.
 
+The same rule applies to `apps/ai`'s `AI_DATABASE_URL`/`AI_DIRECT_URL` and `apps/email`'s `EMAIL_DATABASE_URL`/`EMAIL_DIRECT_URL` (all three use the identical query-timing `$extends` pattern in their own `db.ts`) -- all three services share the same pool_size ceiling on the same Supabase project, since it's the same physical database. Every service getting this right is what makes the pgbouncer rule actually hold in practice, not just on paper -- now three services deep, not two, and the discipline still needs to hold for a fourth if one is ever added.
+
 ## Backup & recovery
 
 - Supabase free/pro tiers include automated daily backups; paid tiers add Point-in-Time Recovery (PITR). Verify which tier the project is on and what RPO/RTO it implies **before** relying on it — this is a dashboard/billing setting, not something this repo controls or can verify from code.
@@ -83,6 +119,10 @@ For a single long-running Node process (this app's deployment model — not serv
 | `idempotency:lock:{key}` | in-flight marker for an `Idempotency-Key` | 60s |
 | `idempotency:result:{key}` | stored `/ingest/run` response for replay | `IDEMPOTENCY_TTL_SECONDS` |
 | `ratelimit:general:{ip}`, `ratelimit:ingest:{ip}` | fixed-window rate-limit counters | `RATE_LIMIT_WINDOW_MS` |
+| `email:ratelimit:general:{ip}`, `email:ratelimit:apikey:{key}` | `apps/email`'s rate limiters, prefixed to avoid key collision with the backend's own (same Redis instance) | `RATE_LIMIT_WINDOW_MS` |
+| `bull:email-send:*`, `bull:email-send-dlq:*` | BullMQ's own queue/job state (`apps/email`, Sprint 4) -- not managed by this app's code, BullMQ owns this keyspace entirely | per-job, BullMQ-managed |
+
+**BullMQ's Redis connection requirement differs from every other Redis client in this repo**: it needs `maxRetriesPerRequest: null` (`apps/email/src/queue/connection.ts`), not the fail-fast `maxRetriesPerRequest: 2` used everywhere else (`docs/DATABASE.md` "Connection resilience" below) -- BullMQ relies on blocking Redis commands that must be allowed to wait, and the fail-fast setting breaks them. Two separate ioredis connections exist in `apps/email` for exactly this reason: one fail-fast (rate limiting, health checks), one for BullMQ.
 
 `creator:email`/`creator:website` used to share `CACHE_TTL` with the unrelated search-result cache — after that TTL (1h) expired, an already-stored creator's URL/email would silently re-enter the full pipeline again (Postgres's unique constraint still blocked the actual duplicate row, but only after redoing all three downstream calls). Split into its own `DUPLICATE_TTL_SECONDS` so the fast-path cache window actually matches the "don't repeat expensive work for known creators" intent, independent of how long search results should stay cached.
 

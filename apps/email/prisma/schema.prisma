@@ -1,0 +1,147 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Same physical Postgres database as apps/backend and apps/ai, own schema
+// ("email", set via ?schema=email on EMAIL_DATABASE_URL/EMAIL_DIRECT_URL) --
+// identical isolation pattern to apps/ai, see docs/DATABASE.md "AI schema
+// isolation" (renamed conceptually to "per-service schema isolation" there).
+datasource db {
+  provider  = "postgresql"
+  url       = env("EMAIL_DATABASE_URL")
+  directUrl = env("EMAIL_DIRECT_URL")
+}
+
+// A configured "From" identity. provider selects which adapter
+// (smtp|resend|ses|sendgrid) sends on this profile's behalf -- see
+// src/providers/. spf/dkim/dmarc flags are set by the DNS verification
+// utility (src/services/deliverability.ts) or manually via ops, never
+// auto-assumed true.
+model SenderProfile {
+  id            String   @id @default(uuid())
+  name          String
+  fromEmail     String
+  fromName      String
+  replyTo       String?
+  provider      String // "smtp" | "resend" | "ses" | "sendgrid"
+  isActive      Boolean  @default(true)
+  spfVerified   Boolean  @default(false)
+  dkimVerified  Boolean  @default(false)
+  dmarcVerified Boolean  @default(false)
+  lastVerifiedAt DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  campaigns Campaign[]
+
+  @@map("sender_profiles")
+}
+
+// status: draft -> pending_review -> approved -> queued -> sending ->
+// completed (or cancelled/failed at various points). Every transition is
+// guarded in code (src/services/campaignService.ts) -- there is no path
+// from draft straight to queued/sending, see "Sending Rules" in
+// docs/API.md.
+model Campaign {
+  id              String    @id @default(uuid())
+  name            String
+  senderProfileId String
+  senderProfile   SenderProfile @relation(fields: [senderProfileId], references: [id])
+  status          String    @default("draft")
+  approvedBy      String?
+  approvedAt      DateTime?
+  sendStartedAt   DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  recipients CampaignRecipient[]
+
+  @@index([status])
+  @@map("campaigns")
+}
+
+// One row per (campaign, recipient email) -- unique constraint enforces
+// "one active send per recipient per campaign" (Sending Rules #5) at the
+// database level, not just in application logic. draftEmailId references
+// apps/ai's draft_emails.id by value only (no cross-schema FK, same
+// boundary-respecting pattern as apps/ai referencing apps/backend's
+// creators by id) -- the actual draft subject/body is fetched over HTTP
+// from apps/ai when a send is enqueued, then archived into
+// email_provider_logs so the exact content sent is on record even if the
+// draft later changes.
+model CampaignRecipient {
+  id           String   @id @default(uuid())
+  campaignId   String
+  campaign     Campaign @relation(fields: [campaignId], references: [id])
+  creatorId    String
+  draftEmailId String
+  email        String
+  status       String   @default("pending") // pending|queued|sent|delivered|deferred|bounced|opened|clicked|replied|failed|suppressed|skipped_duplicate
+  queueJobId   String?
+  sentAt       DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  events        EmailEvent[]
+  providerLogs  EmailProviderLog[]
+
+  @@unique([campaignId, email])
+  @@index([campaignId, status])
+  @@index([email])
+  @@map("campaign_recipients")
+}
+
+// The business-level status timeline (requirement #5: Queued, Sent,
+// Delivered, Deferred, Bounced, Opened, Clicked, Replied, Failed). Populated
+// both by the queue worker (queued/sent/failed) and by provider webhooks
+// (delivered/deferred/bounced/opened/clicked) or a manual API call
+// (replied -- no reply automation, see Sending Rules).
+model EmailEvent {
+  id                  String   @id @default(uuid())
+  campaignRecipientId String
+  campaignRecipient   CampaignRecipient @relation(fields: [campaignRecipientId], references: [id])
+  eventType           String // queued|sent|delivered|deferred|bounced|opened|clicked|replied|failed
+  providerMessageId   String?
+  metadata            Json?
+  occurredAt          DateTime @default(now())
+  createdAt           DateTime @default(now())
+
+  @@index([campaignRecipientId])
+  @@index([eventType])
+  @@index([occurredAt])
+  @@map("email_events")
+}
+
+// The raw provider-interaction audit log (request/response per send
+// attempt) -- distinct from EmailEvent's business timeline. Never stores
+// provider API keys/secrets (see docs/SECURITY.md).
+model EmailProviderLog {
+  id                  String   @id @default(uuid())
+  campaignRecipientId String?
+  campaignRecipient   CampaignRecipient? @relation(fields: [campaignRecipientId], references: [id])
+  provider            String
+  requestSummary      Json
+  responseStatus      String // "success" | "error"
+  responseBody        Json?
+  latencyMs           Int
+  createdAt           DateTime @default(now())
+
+  @@index([campaignRecipientId])
+  @@index([createdAt])
+  @@map("email_provider_logs")
+}
+
+// Global, cross-campaign. Checked before every enqueue (Sending Rules:
+// "Respect suppression lists") -- not part of the literal 5-table list in
+// the Sprint 4 spec, but required by its own "Respect suppression lists"
+// rule; there is nowhere else to store it.
+model SuppressionEntry {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  reason    String // "bounced" | "complained" | "manual" | "unsubscribed"
+  source    String? // e.g. a provider webhook event id, or an operator note
+  createdAt DateTime @default(now())
+
+  @@map("suppression_list")
+}

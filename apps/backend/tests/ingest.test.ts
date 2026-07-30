@@ -61,8 +61,8 @@ describe("POST /api/v1/ingest/run", () => {
     (pipeline.search as jest.Mock).mockResolvedValue(["https://instagram.com/a"]);
     (pipeline.extract as jest.Mock).mockResolvedValue({
       email: "a@example.com",
-      social_links: [],
-      bio: "bio",
+      social_links: ["https://instagram.com/a", "https://youtube.com/a"],
+      bio: "We are a couple who loves to travel.",
       source_url: "https://instagram.com/a",
     });
     (pipeline.validate as jest.Mock).mockResolvedValue({
@@ -82,6 +82,16 @@ describe("POST /api/v1/ingest/run", () => {
     expect(res.body.stored).toBe(1);
     expect(res.body.skippedDuplicates).toBe(0);
     expect(prisma.creator.create).toHaveBeenCalledTimes(1);
+    // Regression: bio/social_links from the extractor used to be silently
+    // discarded here instead of persisted -- see apps/backend/src/routes/ingest.ts.
+    expect(prisma.creator.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          bio: "We are a couple who loves to travel.",
+          socialLinks: ["https://instagram.com/a", "https://youtube.com/a"],
+        }),
+      })
+    );
   });
 
   it("skips a URL whose email was already seen (duplicate prevention)", async () => {

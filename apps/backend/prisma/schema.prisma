@@ -17,6 +17,14 @@ model Creator {
   instagram  String?
   youtube    String?
   tiktok     String?
+  // Extracted by apps/python/extractor's /extract response but previously
+  // discarded by ingest.ts before ever reaching this table -- added for the
+  // AI personalization pipeline (Sprint 3), which needs real creator content
+  // to summarize (PROJECT.md: AI must never fabricate data). Nullable/
+  // backward-compatible: existing rows simply have no bio/socialLinks until
+  // re-ingested.
+  bio         String?
+  socialLinks String[] @default([])
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 

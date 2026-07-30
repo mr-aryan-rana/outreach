@@ -24,3 +24,7 @@ export const creatorsQuerySchema = z.object({
 });
 
 export type CreatorsQueryInput = z.infer<typeof creatorsQuerySchema>;
+
+export const creatorIdParamSchema = z.object({
+  id: z.string().uuid(),
+});

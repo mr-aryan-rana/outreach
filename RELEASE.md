@@ -1,3 +1,69 @@
+# Sprint 4 RC Report: Email Delivery Platform (apps/email)
+
+## Status: COMPLETE, not tagged (feature sprint, not a version bump on its own — see "Versioning going forward" below)
+
+Sprint 4 built `apps/email`, a standalone Draft→Review→Approve→Send email delivery service, on top of Sprint 3's `apps/ai` (drafts) and RC1/RC2's `apps/backend` (creator discovery). All live verification used the `mock` provider exclusively — zero real network calls, zero cost, zero risk of an actual send during development. This report covers Architecture, Database, Queue, Provider Adapter, API, Tests, and Documentation as required, followed by the RC recommendation.
+
+## Architecture
+
+Standalone Node/TS/Express/Prisma service, own Postgres schema (`email`), own Redis usage (BullMQ + rate limiting), reads draft content from `apps/ai` and creator identity from `apps/backend` over authenticated HTTP — never queries either service's tables directly (`docs/ARCHITECTURE.md` "Email delivery pipeline", `docs/DATABASE.md` "Per-service schema isolation"). Runs as **two processes**: an API process that only enqueues, and a separate BullMQ worker process that is the sole code path calling a provider's `send()`. Full pipeline diagram in `docs/ARCHITECTURE.md`.
+
+The hard safety boundary — "never send without human approval" — is a state-machine gate (`pending_review → approved → queued → sending → completed`) enforced in `services/campaignService.ts`'s `sendCampaign()`, which throws `InvalidStateTransitionError` for any campaign not already `"approved"`. There is no other code path to a provider call. See `docs/SECURITY.md` "Sending-without-approval prevention".
+
+## Database
+
+6 tables in the `email` schema: `sender_profiles`, `campaigns`, `campaign_recipients` (`@@unique([campaignId, email])` — the hard dedupe backstop), `email_events`, `email_provider_logs`, `suppression_list`. Full column/index reference in `docs/DATABASE.md` "Email schema isolation". Migration applied additively, non-destructively, against the live shared Supabase instance per the standing environment rules — no existing table/data touched.
+
+## Queue
+
+BullMQ (`EMAIL_SEND_QUEUE`), one job per recipient. `sendCampaign()` sets `attempts`/exponential `backoff`/`delay`/`priority` at enqueue time, spacing sends per `EMAIL_DELAY_MIN`/`EMAIL_DELAY_MAX`/`MAX_EMAILS_PER_HOUR` (PROJECT.md's own documented env var names, reused verbatim). Jobs that exhaust every retry move to a dedicated `EMAIL_SEND_DLQ` queue (not just BullMQ's built-in failed-job set) and mark the recipient `failed`. Verified live: a campaign sent through the full queue → mock-provider → tracked pipeline, delayed jobs picked up correctly by the worker, dashboard queue counts drained to zero.
+
+## Provider Adapter
+
+Same pattern as `apps/ai`'s AI provider adapters: a 2-method `EmailProvider` interface, a `registry.ts` resolving by name, one file per provider (`mock`/`smtp`/`resend`/`ses`/`sendgrid`), `MockEmailProvider` as the default and the only one exercised in this session's live verification. Adding a sixth provider requires only a new file implementing the interface — no changes elsewhere.
+
+## API
+
+5 core endpoints (`POST /campaigns`, `POST /campaigns/:id/approve`, `POST /campaigns/:id/send`, `GET /campaigns/:id/status`, `GET /email-events`) plus the dashboard API (4 read-only aggregate endpoints) plus small structurally-necessary additive endpoints (`sender-profiles`, `suppression`, `mark-replied`, `webhooks/*`) — same "small, necessary, additive endpoint" precedent as `GET /creators/:id` (RC1) and `GET /ai/drafts/:id` (Sprint 3). Full reference in `docs/API.md` "Email Delivery Service".
+
+## Tests
+
+44/44 passing (`tests/services/campaignService.test.ts` ×12 including explicit `it.each` coverage that every non-`"approved"` status is refused by `sendCampaign()`, `tests/queue/worker.test.ts` ×7 including DLQ/failure-recovery, `tests/queue/emailQueue.test.ts` ×4, `tests/routes/campaigns.test.ts` ×9, `tests/routes/webhooks.test.ts` ×5, `tests/providers/mock.test.ts` ×2, `tests/hardening.test.ts` ×5 including a regression test for the rate-limiter double-count bug found this sprint). Lint clean, typecheck clean, build clean, `npm audit --omit=dev` clean.
+
+## Documentation
+
+`docs/API.md`, `DEPLOYMENT.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `docs/DATABASE.md` all updated with Sprint 4 content (endpoints, campaign lifecycle, provider adapters, worker deployment, deliverability/SPF/DKIM/DMARC guidance, DLQ operational notes, webhook auth gap, suppression/dedup guarantees, sending-without-approval enforcement).
+
+## Bugs found and fixed during this sprint (live testing, not just unit tests)
+
+1. **`nodemailer` high-severity CVEs** (SMTP command injection/CRLF injection/SSRF) — found via `npm audit --omit=dev` before writing the SMTP adapter, fixed by bumping to `^9.0.3` before any code depended on the vulnerable range.
+2. **Double rate-limit counting** (`ERR_ERL_DOUBLE_COUNT`) — two separate `buildGeneralRateLimiter()` instances both covering `/api/v1/*`, found live via test console output, fixed by consolidating to one shared instance mounted once on the whole `/api/v1` prefix. Regression test added.
+3. **`EmailEvent.providerMessageId` not populated on "sent" events** — found live while inspecting `GET /email-events` output during manual end-to-end verification (field was buried in `metadata` only). Fixed `recordEvent()` to accept/set the dedicated indexed column. Regression test added.
+
+## Explicit rules verified
+
+- **Never send without approval**: enforced by `sendCampaign()`'s state guard, covered by `it.each` tests over every non-`approved` status, and live-verified (attempted send on an unapproved campaign → `409 invalid_state_transition`).
+- **Never bypass suppression**: checked at creation time and again at send time by the worker; live-verified (added a suppressed address, created a campaign targeting it, confirmed `status: "suppressed"` immediately at creation, never enqueued).
+- **Never duplicate emails**: `@@unique([campaignId, email])` backstop plus in-memory input dedup; live-verified via the campaign creation flow.
+- **No reply automation**: replies are marked only via the manual `mark-replied` endpoint; no inbox-inspection code exists anywhere in this service.
+- **No AI changes**: `apps/ai` was touched only to add `GET /ai/drafts/:id`, a read endpoint needed for `apps/email` to fetch draft content — no change to drafting/generation logic itself.
+- **No mass sending**: `MAX_EMAILS_PER_HOUR`/`EMAIL_DELAY_MIN`/`EMAIL_DELAY_MAX` are applied to every enqueue, and there is no bulk/immediate-send endpoint — `sendCampaign()` always spaces recipients across time.
+
+## Risks / known gaps (carried forward explicitly, not glossed over)
+
+- **Webhook authentication** is a shared-secret token, not per-provider HMAC signature verification — a documented gap to close before any real (non-mock) provider goes live (`docs/SECURITY.md`).
+- **SES/SNS bounce parsing** is not implemented (`POST /webhooks/ses` only logs receipt) — the SNS subscription-confirmation handshake and event parsing are future work.
+- **No "sweep completed campaigns" job** — `campaign.status` doesn't automatically reach `"completed"`; use `recipientCounts` (all-terminal) instead of polling `status`.
+- **Deliverability setup (SPF/DKIM/DMARC/warm-up)** is DNS/provider-account configuration outside this repo's code — documented in `DEPLOYMENT.md`, not something a code change can verify or guarantee.
+- **CAN-SPAM compliance** (unsubscribe mechanism inside the actual email body) is outside this service's control — the body comes from `apps/ai`'s draft — and legal sign-off remains an open item from RC1, now more load-bearing since a real send path exists.
+- All of the above are pre-existing, explicitly-scoped-out gaps for this sprint (per the Sprint 4 task spec's own "Do NOT implement" list), not defects introduced by this work.
+
+## Recommendation: GO for continued mock-provider use; NOT YET for a real (non-mock) provider integration
+
+Every explicit Sprint 4 rule is enforced and verified. The gaps above are all pre-scoped exclusions (webhook HMAC verification, SES parsing, legal CAN-SPAM sign-off) rather than defects, but they are hard prerequisites before pointing a real sender-profile at a real provider account — this recommendation reflects that distinction rather than treating "tests pass" as equivalent to "safe to send real email."
+
+---
+
 # Release: v1.0.0-rc2
 
 ## Status: TAGGED

@@ -1,6 +1,6 @@
 # Deployment
 
-Covers `apps/backend` (Node/TS/Express/Prisma) and the three Python services (`apps/python/search`, `apps/python/extractor`, `apps/python/validator`). There is no frontend, AI service, or email-sending service yet — see `PROJECT.md`.
+Covers `apps/backend` (Node/TS/Express/Prisma), the three Python services (`apps/python/search`, `apps/python/extractor`, `apps/python/validator`), `apps/ai` (Node/TS/Express/Prisma, AI drafting -- Sprint 3), and `apps/email` (Node/TS/Express/Prisma/BullMQ, email delivery -- Sprint 4). There is no frontend yet — see `PROJECT.md`. All four Node services share one physical Supabase Postgres database via isolated schemas (`public`/`ai`/`email`) and one Upstash Redis instance — see `docs/DATABASE.md` "Per-service schema isolation".
 
 ## Prerequisites
 
@@ -31,6 +31,42 @@ Covers `apps/backend` (Node/TS/Express/Prisma) and the three Python services (`a
 6. **Deploy the backend** (`npm run build && npm start`, or `npm run dev` for non-prod). Set `SEARCH_SERVICE_URL`/`EXTRACTOR_SERVICE_URL`/`VALIDATOR_SERVICE_URL` to the deployed Python service addresses, and `CORS_ALLOWED_ORIGINS` if a browser frontend needs to call this API directly (empty = deny all cross-origin requests, the correct default while there's no auth layer).
 7. **Verify**: `GET /health` (liveness), `GET /ready` (checks Postgres + Redis + all three Python services, `apps/backend/src/routes/health.ts`), `GET /metrics` (Prometheus), `GET /api-docs` (Swagger UI).
 8. **Send SIGTERM, not SIGKILL, on deploy/restart**: the backend handles `SIGTERM`/`SIGINT` with a graceful drain (finish in-flight requests, close Prisma/Redis, 10s force-exit ceiling — `apps/backend/src/server.ts`). Whatever orchestrator manages the process (systemd, Kubernetes, ECS, PM2) must be configured to send a graceful-stop signal and wait for exit, not hard-kill.
+
+## Deploying apps/ai (Sprint 3)
+
+Standalone service, own process/port, own Postgres schema (`ai`). Same shape as `apps/backend`'s deployment above:
+
+1. Copy `apps/ai/.env.example` to `.env`, fill in `AI_DATABASE_URL`/`AI_DIRECT_URL` (pooled/direct, same pgbouncer rule as the backend), `REDIS_URL`, `AI_API_KEYS`, `BACKEND_URL`/`BACKEND_API_KEY` (it fetches creator data from `apps/backend` over HTTP, never queries the `public` schema directly), and provider credentials for whichever of `AI_PRIMARY_PROVIDER`/`AI_FALLBACK_PROVIDER` you're using (`openai`/`anthropic`/`gemini`/`mock`).
+2. `cd apps/ai && npm install && npx prisma migrate deploy` — applies the `ai` schema's own migration history (separate `_prisma_migrations` table from the backend's, scoped by the `?schema=ai` connection param).
+3. `npm run build && npm start`.
+4. Verify: `GET /health`, `GET /ready` (checks Postgres `ai` schema, Redis, and `apps/backend`'s `/health` — deliberately does not check AI provider reachability, see `docs/API.md`), `GET /metrics`.
+5. This service is **drafts only** — it never sends email and has no queue/worker process to deploy.
+
+## Deploying apps/email (Sprint 4)
+
+Standalone service, own Postgres schema (`email`), and unlike the other three services, runs as **two separate processes** that must both be deployed:
+
+1. Copy `apps/email/.env.example` to `.env`, fill in `EMAIL_DATABASE_URL`/`EMAIL_DIRECT_URL`, `REDIS_URL`, `EMAIL_API_KEYS`, `AI_SERVICE_URL`/`AI_SERVICE_API_KEY` (fetches draft content from `apps/ai` over HTTP), `BACKEND_URL`/`BACKEND_API_KEY`, `WEBHOOK_SHARED_SECRET` (see `docs/SECURITY.md` "Webhook authentication" — leaving this unset is acceptable for dev only), and provider credentials for whichever providers your `sender_profiles` actually name (`SMTP_*`/`RESEND_API_KEY`/`AWS_REGION`+SES IAM credentials/`SENDGRID_API_KEY`) — default everywhere in this repo's own `.env` is `mock`, which makes zero network calls.
+2. `cd apps/email && npm install && npx prisma migrate deploy` — applies the `email` schema's migration history.
+3. **API process**: `npm run build && npm start` (or `npm run start:worker`'s counterpart, `npm start`, which serves `/api/v1/*`).
+4. **Worker process**: `npm run start:worker` (compiled) / `npm run worker` (dev, `ts-node-dev`) — a **separate, independently-deployed process** (`src/queue/runWorker.ts`) that consumes the `EMAIL_SEND_QUEUE` BullMQ queue and is the only code path that actually calls a provider's `send()`. Deploy it like any other long-running worker (systemd unit, Kubernetes `Deployment` distinct from the API's, ECS service) — it does not listen on an HTTP port. It handles `SIGTERM`/`SIGINT` by calling `worker.close()` (lets in-flight jobs finish) before exiting; send a graceful-stop signal on redeploy, same requirement as the API process.
+5. Scale the worker independently of the API: `EMAIL_QUEUE_CONCURRENCY` controls how many jobs one worker process handles concurrently; running multiple worker processes/instances against the same Redis is safe (BullMQ handles distributed locking) and is the way to increase overall send throughput within `MAX_EMAILS_PER_HOUR`/`MAX_EMAILS_PER_DAY`.
+6. Verify: `GET /health`, `GET /ready` (Postgres `email` schema, Redis, queue connection), `GET /metrics`. Then a full dry run with `EMAIL_PROVIDER=mock`/a `mock` sender profile: create a campaign, approve it, send it, poll `GET /campaigns/:id/status` until `recipientCounts.sent` matches, confirm `GET /dashboard/queue` drains to zero waiting/active/delayed.
+
+### Deliverability setup (SPF/DKIM/DMARC, warm-up, bounce handling)
+
+None of this is code — it's DNS/provider-account configuration that must be done once per sending domain, outside this repo, before any real (non-mock) send:
+
+- **SPF**: add a TXT record on the sending domain authorizing your provider's sending IPs/servers (each provider — SES, SendGrid, Resend, or your SMTP relay — publishes the exact record to add).
+- **DKIM**: enable DKIM signing in the provider's dashboard for the sending domain, add the resulting CNAME/TXT records they give you.
+- **DMARC**: add a `_dmarc` TXT record (start with `p=none` to monitor without rejecting, tighten to `p=quarantine`/`p=reject` once SPF/DKIM alignment is confirmed clean).
+- **Warm-up**: a brand-new sending domain/IP has no reputation — start with low daily volume and ramp gradually (days to weeks, provider-dependent) rather than immediately sending at `MAX_EMAILS_PER_DAY`. `EMAIL_DELAY_MIN`/`EMAIL_DELAY_MAX`/`MAX_EMAILS_PER_HOUR` (`sendCampaign()`, `docs/API.md`) space sends out programmatically, but the *ceiling* values themselves need to start low and be raised manually as reputation builds — this service does not automate warm-up ramping.
+- **Bounce handling**: `POST /webhooks/{resend,sendgrid,ses}` auto-suppresses on a `bounced` event (`routes/webhooks.ts`) — but the webhook itself must be registered in the provider's dashboard pointing at this service's public URL, and (for SES) the SNS `SubscriptionConfirmation` handshake completed, before bounce events ever arrive. Until that's done, bounces will accumulate silently against sender reputation with no automatic suppression.
+- **SES specifically**: `POST /webhooks/ses` currently only logs receipt of the raw SNS payload — the SNS subscription-confirmation handshake and the actual bounce/complaint event parsing are not implemented in this slice (see `docs/API.md`). Do not rely on SES auto-suppression working until this is built out.
+
+### DLQ operational notes
+
+Jobs that exhaust `EMAIL_QUEUE_MAX_ATTEMPTS` retries are moved to a dedicated `EMAIL_SEND_DLQ` BullMQ queue (`src/queue/emailQueue.ts`) rather than just sitting in the main queue's failed-job set, and the recipient is marked `failed` (`GET /campaigns/:id/status` surfaces this without needing queue access). To inspect: `GET /dashboard/queue`'s `deadLetter` count, or connect a BullMQ UI (e.g. Bull Board, not included in this repo) to the same Redis instance pointed at both `EMAIL_SEND_QUEUE` and `EMAIL_SEND_DLQ`. There is no automatic DLQ reprocessing job — a human must decide whether a dead-lettered send should be manually retried (re-enqueue via `enqueueSend()`) after fixing the underlying cause (bad sender-profile credentials, provider outage, etc.), since blindly replaying could violate the dedupe/suppression guarantees if state has changed since the original attempt.
 
 ## Subsequent deployments
 
@@ -87,5 +123,6 @@ Same tiers under normal production rate limiting (the actual deployed configurat
 - API key auth is flat/global (any valid key can access anything) — no per-tenant scoping/roles yet. See `docs/SECURITY.md` "Authentication".
 - Rate limiting is both per-IP and per-API-key (`RATE_LIMIT_MAX`/`API_KEY_RATE_LIMIT_MAX`/`INGEST_RATE_LIMIT_MAX`), and fails open on a Redis outage (`apps/backend/src/middleware/rateLimit.ts`) — a sustained Redis outage means rate limiting is not enforced, not that traffic is blocked.
 - `POST /api/v1/ingest/run` is synchronous per request — it walks every candidate URL from `search` sequentially. Large `niche` result sets will hold the HTTP connection open for the full duration; there is no job queue yet (`BullMQ` is in `PROJECT.md`'s target stack but not implemented).
-- No SMTP/email-sending service exists — this is a discovery/storage slice only.
+- `apps/email`'s webhook endpoints (`/webhooks/{resend,sendgrid,ses}`) use a shared-secret token, not per-provider HMAC signature verification — see `docs/SECURITY.md` "Webhook authentication". `apps/email`'s SES webhook does not yet parse real bounce/complaint events (SNS handshake not implemented) — see "Deliverability setup" above.
+- `apps/email` has no "sweep completed campaigns" job — a campaign's `status` column only reaches `queued`/`sending` automatically; use `GET /campaigns/:id/status`'s `recipientCounts` (all-terminal = done) rather than polling `status` for `completed`.
 - **Graceful-shutdown OS-signal delivery is unverified on Windows dev sandboxes** — confirmed this session that Windows refuses graceful `taskkill` for a backgrounded Node process ("can only be terminated forcefully") and cross-process `SIGTERM`/`SIGINT` don't reliably invoke the JS handler either; this is a well-documented Node-on-Windows limitation, not an app defect. The shutdown *logic* itself (`httpServer.close()` + `Promise.all([prisma.$disconnect(), redis.quit()])` + 10s force-exit ceiling, `apps/backend/src/server.ts`) is straightforward and correct by code review, and Linux/Docker/Kubernetes (the actual deployment target) deliver `SIGTERM` natively and reliably. **Verify this with a real signal test in a Linux CI job or staging container before depending on it operationally** — it has not been conclusively proven end-to-end in any environment yet, only code-reviewed.
