@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Creator {
+  id         String   @id @default(uuid())
+  handle     String
+  platform   String
+  niche      String
+  websiteUrl String?  @unique
+  instagram  String?
+  youtube    String?
+  tiktok     String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  emails Email[]
+
+  @@unique([handle, platform])
+  @@index([niche])
+  @@index([platform])
+  @@index([niche, platform])
+  @@index([instagram])
+  @@index([youtube])
+  @@index([tiktok])
+  @@index([createdAt])
+}
+
+model Email {
+  id        String   @id @default(uuid())
+  address   String   @unique
+  sourceUrl String
+  creatorId String
+  creator   Creator  @relation(fields: [creatorId], references: [id])
+  createdAt DateTime @default(now())
+
+  validationResult ValidationResult?
+
+  @@index([creatorId])
+}
+
+model ValidationResult {
+  id              String   @id @default(uuid())
+  emailId         String   @unique
+  email           Email    @relation(fields: [emailId], references: [id])
+  isValid         Boolean
+  confidenceScore Float
+  reasons         String[]
+  checkedAt       DateTime @default(now())
+
+  @@index([checkedAt])
+}
