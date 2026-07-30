@@ -3,7 +3,7 @@ import { hasRealDatabase } from "./shouldRun";
 const describeIfConfigured = hasRealDatabase() ? describe : describe.skip;
 
 if (!hasRealDatabase()) {
-  // eslint-disable-next-line no-console
+   
   console.log(
     "[integration] Skipping database.integration.test.ts: set a real Supabase DATABASE_URL/DIRECT_URL in .env to run this."
   );

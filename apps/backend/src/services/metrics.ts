@@ -31,3 +31,21 @@ export const cacheResultCounter = new client.Counter({
   labelNames: ["cache", "result"],
   registers: [registry],
 });
+
+export const redisFailureCounter = new client.Counter({
+  name: "redis_operation_failures_total",
+  help: "Count of Redis operations that failed and fell back to fail-open/degraded behavior",
+  labelNames: ["component"],
+  registers: [registry],
+});
+
+export const dbQueryDuration = new client.Histogram({
+  name: "db_query_duration_seconds",
+  help: "Prisma query duration in seconds, per model+operation",
+  labelNames: ["model", "operation"],
+  // Finer-grained than the HTTP histogram at the low end: a query that's
+  // "slow" in absolute terms (a few hundred ms) is normal for a full HTTP
+  // request but a red flag for a single DB call.
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.3, 0.5, 1, 2, 5],
+  registers: [registry],
+});

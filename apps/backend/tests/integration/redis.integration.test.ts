@@ -4,7 +4,7 @@ import { hasRealRedis } from "./shouldRun";
 const describeIfConfigured = hasRealRedis() ? describe : describe.skip;
 
 if (!hasRealRedis()) {
-  // eslint-disable-next-line no-console
+   
   console.log("[integration] Skipping redis.integration.test.ts: set a real Upstash REDIS_URL in .env to run this.");
 }
 

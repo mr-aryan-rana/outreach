@@ -16,9 +16,7 @@ describe("createResiliencePolicy circuit breaker metric", () => {
   it("reports the real breaker state (moves off 0 when the breaker actually opens)", async () => {
     process.env.CIRCUIT_BREAKER_THRESHOLD = "2";
     jest.resetModules();
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { createResiliencePolicy: freshCreatePolicy } = require("../src/services/resilience");
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { registry: freshRegistry } = require("../src/services/metrics");
 
     const policy = freshCreatePolicy("resilience-test-open");

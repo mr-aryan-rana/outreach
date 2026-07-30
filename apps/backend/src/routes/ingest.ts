@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../db";
 import { asyncHandler } from "../middleware/asyncHandler";
+import { sendError } from "../middleware/errors";
 import { DuplicateChecker } from "../services/duplicateCheck";
 import { IdempotencyService } from "../services/idempotency";
 import { ingestStageCounter } from "../services/metrics";
@@ -24,7 +25,7 @@ export function buildIngestRouter(duplicateChecker: DuplicateChecker, pipeline: 
   router.post("/ingest/run", asyncHandler(async (req, res) => {
     const parsed = ingestRunSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: "invalid body", details: parsed.error.issues });
+      return sendError(req, res, 400, "invalid_body", "invalid body", parsed.error.issues);
     }
     const { niche, platform } = parsed.data;
     const requestId = (req as any).id as string | undefined;
@@ -37,7 +38,13 @@ export function buildIngestRouter(duplicateChecker: DuplicateChecker, pipeline: 
         return res.json(check.result);
       }
       if (check.state === "in_progress") {
-        return res.status(409).json({ error: "a request with this Idempotency-Key is already in progress" });
+        return sendError(
+          req,
+          res,
+          409,
+          "idempotency_in_progress",
+          "a request with this Idempotency-Key is already in progress"
+        );
       }
     }
 
@@ -48,8 +55,14 @@ export function buildIngestRouter(duplicateChecker: DuplicateChecker, pipeline: 
       urls = await pipeline.search(platform, niche, requestId);
     } catch (err) {
       if (idempotencyKey) await idempotency.release(idempotencyKey);
-      const status = err instanceof BrokenCircuitError ? 503 : 502;
-      return res.status(status).json({ error: `search service unavailable: ${(err as Error).message}` });
+      const isBroken = err instanceof BrokenCircuitError;
+      return sendError(
+        req,
+        res,
+        isBroken ? 503 : 502,
+        isBroken ? "service_unavailable" : "bad_gateway",
+        `search service unavailable: ${(err as Error).message}`
+      );
     }
     stats.requested = urls.length;
     ingestStageCounter.labels("requested").inc(urls.length);

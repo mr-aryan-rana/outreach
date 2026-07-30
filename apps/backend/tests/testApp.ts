@@ -4,6 +4,11 @@ import { DuplicateChecker } from "../src/services/duplicateCheck";
 import { IdempotencyService } from "../src/services/idempotency";
 import { Pipeline } from "../src/services/pipeline";
 
+// Matches API_KEYS set in tests/setupEnv.ts -- every test hitting a
+// /api/v1/* route needs to send this (or a dedicated auth test intentionally
+// omits/corrupts it to exercise the 401 path).
+export const TEST_API_KEY = "test-api-key";
+
 export function fakePipeline(): jest.Mocked<Pipeline> {
   return {
     search: jest.fn(),

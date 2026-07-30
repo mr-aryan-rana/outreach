@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import os
+import sys
 
-from request_logging import RequestLoggingMiddleware, configure_json_logging
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "shared"))
+from request_logging import RequestLoggingMiddleware, configure_json_logging  # noqa: E402
 
 
 class DummyResponse:

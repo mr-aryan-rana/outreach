@@ -13,7 +13,7 @@ jest.mock("../../src/db", () => ({
 import RedisMock from "ioredis-mock";
 import { prisma } from "../../src/db";
 import { DuplicateChecker } from "../../src/services/duplicateCheck";
-import { buildTestApp, fakePipeline } from "../testApp";
+import { buildTestApp, fakePipeline, TEST_API_KEY } from "../testApp";
 
 describe("e2e: /api/v1/ingest/run -> /api/v1/creators", () => {
   beforeEach(() => jest.clearAllMocks());
@@ -39,6 +39,7 @@ describe("e2e: /api/v1/ingest/run -> /api/v1/creators", () => {
 
     const ingestRes = await request(app)
       .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
       .send({ niche: "couple vlog", platform: "instagram" });
 
     expect(ingestRes.status).toBe(200);
@@ -52,9 +53,16 @@ describe("e2e: /api/v1/ingest/run -> /api/v1/creators", () => {
     expect(res.status).toBe(404);
   });
 
-  it("exposes rate-limit headers on API responses", async () => {
+  it("rejects /api/v1/* requests without a valid API key", async () => {
     const { app } = buildTestApp();
     const res = await request(app).get("/api/v1/creators");
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("unauthorized");
+  });
+
+  it("exposes rate-limit headers on API responses", async () => {
+    const { app } = buildTestApp();
+    const res = await request(app).get("/api/v1/creators").set("X-API-Key", TEST_API_KEY);
     expect(res.headers["ratelimit-limit"]).toBeDefined();
     expect(res.headers["ratelimit-remaining"]).toBeDefined();
   });
@@ -67,8 +75,16 @@ describe("e2e: /api/v1/ingest/run -> /api/v1/creators", () => {
     const { app } = buildTestApp({ duplicateChecker: new DuplicateChecker(redis as any), pipeline, redis: redis as any });
     const body = { niche: "couple vlog", platform: "instagram" };
 
-    const first = await request(app).post("/api/v1/ingest/run").set("Idempotency-Key", "e2e-key").send(body);
-    const second = await request(app).post("/api/v1/ingest/run").set("Idempotency-Key", "e2e-key").send(body);
+    const first = await request(app)
+      .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
+      .set("Idempotency-Key", "e2e-key")
+      .send(body);
+    const second = await request(app)
+      .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
+      .set("Idempotency-Key", "e2e-key")
+      .send(body);
 
     expect(first.status).toBe(200);
     expect(second.body).toEqual(first.body);

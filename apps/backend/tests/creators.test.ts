@@ -10,7 +10,7 @@ jest.mock("../src/db", () => ({
 }));
 
 import { prisma } from "../src/db";
-import { buildTestApp } from "./testApp";
+import { buildTestApp, TEST_API_KEY } from "./testApp";
 
 describe("GET /api/v1/creators", () => {
   beforeEach(() => jest.clearAllMocks());
@@ -28,7 +28,7 @@ describe("GET /api/v1/creators", () => {
     ]);
 
     const { app } = buildTestApp();
-    const res = await request(app).get("/api/v1/creators");
+    const res = await request(app).get("/api/v1/creators").set("X-API-Key", TEST_API_KEY);
 
     expect(res.status).toBe(200);
     expect(res.body.page).toBe(1);
@@ -42,21 +42,27 @@ describe("GET /api/v1/creators", () => {
     (prisma.creator.findMany as jest.Mock).mockResolvedValue([]);
 
     const { app } = buildTestApp();
-    const res = await request(app).get("/api/v1/creators").query({ pageSize: 500 });
+    const res = await request(app).get("/api/v1/creators").set("X-API-Key", TEST_API_KEY).query({ pageSize: 500 });
 
     expect(res.body.pageSize).toBe(100);
   });
 
   it("rejects an invalid page value", async () => {
     const { app } = buildTestApp();
-    const res = await request(app).get("/api/v1/creators").query({ page: "not-a-number" });
+    const res = await request(app)
+      .get("/api/v1/creators")
+      .set("X-API-Key", TEST_API_KEY)
+      .query({ page: "not-a-number" });
 
     expect(res.status).toBe(400);
   });
 
   it("rejects an unsupported platform filter", async () => {
     const { app } = buildTestApp();
-    const res = await request(app).get("/api/v1/creators").query({ platform: "mastodon" });
+    const res = await request(app)
+      .get("/api/v1/creators")
+      .set("X-API-Key", TEST_API_KEY)
+      .query({ platform: "mastodon" });
 
     expect(res.status).toBe(400);
   });
@@ -66,7 +72,7 @@ describe("GET /api/v1/creators", () => {
     (prisma.creator.findMany as jest.Mock).mockResolvedValue([]);
 
     const { app } = buildTestApp();
-    await request(app).get("/api/v1/creators").query({ niche: "couple vlog" });
+    await request(app).get("/api/v1/creators").set("X-API-Key", TEST_API_KEY).query({ niche: "couple vlog" });
 
     expect(prisma.creator.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { niche: "couple vlog" } })

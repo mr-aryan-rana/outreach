@@ -1,7 +1,6 @@
 import { Router } from "express";
 import fetch from "node-fetch";
 import Redis from "ioredis";
-import { PrismaClient } from "@prisma/client";
 import { env } from "../config/env";
 
 interface DependencyCheck {
@@ -10,7 +9,15 @@ interface DependencyCheck {
   error?: string;
 }
 
-async function checkPostgres(prisma: PrismaClient): Promise<DependencyCheck> {
+// Only $queryRaw is needed here -- narrower than the full PrismaClient type
+// so this compiles against both a plain PrismaClient and the query-timing
+// $extends wrapper in src/db.ts (extended clients aren't structurally
+// assignable back to PrismaClient's own type, but both satisfy this).
+interface QueryableDb {
+  $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T>;
+}
+
+async function checkPostgres(prisma: QueryableDb): Promise<DependencyCheck> {
   try {
     await prisma.$queryRaw`SELECT 1`;
     return { name: "postgres", ok: true };
@@ -37,7 +44,7 @@ async function checkHttpService(name: string, baseUrl: string): Promise<Dependen
   }
 }
 
-export function buildHealthRouter(prisma: PrismaClient, redis: Redis): Router {
+export function buildHealthRouter(prisma: QueryableDb, redis: Redis): Router {
   const router = Router();
 
   router.get("/health", (_req, res) => {

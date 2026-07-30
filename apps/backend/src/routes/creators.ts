@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../db";
 import { asyncHandler } from "../middleware/asyncHandler";
+import { sendError } from "../middleware/errors";
 import { creatorsQuerySchema } from "../validation";
 
 export const creatorsRouter = Router();
@@ -8,7 +9,7 @@ export const creatorsRouter = Router();
 creatorsRouter.get("/creators", asyncHandler(async (req, res) => {
   const parsed = creatorsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    return res.status(400).json({ error: "invalid query", details: parsed.error.issues });
+    return sendError(req, res, 400, "invalid_query", "invalid query", parsed.error.issues);
   }
   const { page, pageSize, niche, platform } = parsed.data;
 

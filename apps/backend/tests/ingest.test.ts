@@ -11,7 +11,7 @@ jest.mock("../src/db", () => ({
 import RedisMock from "ioredis-mock";
 import { prisma } from "../src/db";
 import { DuplicateChecker } from "../src/services/duplicateCheck";
-import { buildTestApp, fakePipeline } from "./testApp";
+import { buildTestApp, fakePipeline, TEST_API_KEY } from "./testApp";
 
 function fakeChecker(redis: any, seenEmails: string[] = [], seenSites: string[] = []) {
   for (const email of seenEmails) {
@@ -28,7 +28,7 @@ describe("POST /api/v1/ingest/run", () => {
 
   it("rejects a request missing niche/platform", async () => {
     const { app } = buildTestApp();
-    const res = await request(app).post("/api/v1/ingest/run").send({});
+    const res = await request(app).post("/api/v1/ingest/run").set("X-API-Key", TEST_API_KEY).send({});
     expect(res.status).toBe(400);
   });
 
@@ -36,8 +36,23 @@ describe("POST /api/v1/ingest/run", () => {
     const { app } = buildTestApp();
     const res = await request(app)
       .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
       .send({ niche: "couple vlog", platform: "mastodon" });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects requests without a valid API key", async () => {
+    const { app } = buildTestApp();
+    const missing = await request(app)
+      .post("/api/v1/ingest/run")
+      .send({ niche: "couple vlog", platform: "instagram" });
+    expect(missing.status).toBe(401);
+
+    const wrong = await request(app)
+      .post("/api/v1/ingest/run")
+      .set("X-API-Key", "not-the-right-key")
+      .send({ niche: "couple vlog", platform: "instagram" });
+    expect(wrong.status).toBe(401);
   });
 
   it("runs the full pipeline and stores validated, non-duplicate creators", async () => {
@@ -60,6 +75,7 @@ describe("POST /api/v1/ingest/run", () => {
     const { app } = buildTestApp({ duplicateChecker: fakeChecker(redis), pipeline, redis: redis as any });
     const res = await request(app)
       .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
       .send({ niche: "couple vlog", platform: "instagram" });
 
     expect(res.status).toBe(200);
@@ -86,6 +102,7 @@ describe("POST /api/v1/ingest/run", () => {
     });
     const res = await request(app)
       .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
       .send({ niche: "couple vlog", platform: "instagram" });
 
     expect(res.body.skippedDuplicates).toBe(1);
@@ -112,6 +129,7 @@ describe("POST /api/v1/ingest/run", () => {
     const { app } = buildTestApp({ duplicateChecker: fakeChecker(redis), pipeline, redis: redis as any });
     const res = await request(app)
       .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
       .send({ niche: "couple vlog", platform: "instagram" });
 
     expect(res.body.stored).toBe(0);
@@ -125,6 +143,7 @@ describe("POST /api/v1/ingest/run", () => {
     const { app } = buildTestApp({ pipeline });
     const res = await request(app)
       .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
       .send({ niche: "couple vlog", platform: "instagram" });
 
     expect(res.status).toBe(502);
@@ -150,8 +169,16 @@ describe("POST /api/v1/ingest/run", () => {
     const { app } = buildTestApp({ duplicateChecker: fakeChecker(redis), pipeline, redis: redis as any });
     const body = { niche: "couple vlog", platform: "instagram" };
 
-    const first = await request(app).post("/api/v1/ingest/run").set("Idempotency-Key", "key-1").send(body);
-    const second = await request(app).post("/api/v1/ingest/run").set("Idempotency-Key", "key-1").send(body);
+    const first = await request(app)
+      .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
+      .set("Idempotency-Key", "key-1")
+      .send(body);
+    const second = await request(app)
+      .post("/api/v1/ingest/run")
+      .set("X-API-Key", TEST_API_KEY)
+      .set("Idempotency-Key", "key-1")
+      .send(body);
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);

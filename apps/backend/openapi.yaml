@@ -1,0 +1,286 @@
+openapi: 3.0.3
+info:
+  title: MakeAble Backend API
+  version: "1.0"
+  description: >
+    Search -> Extract -> Validate -> Store pipeline for public creator
+    business-contact discovery. All /api/v1/* routes require an API key
+    (see docs/SECURITY.md).
+servers:
+  - url: /api/v1
+    description: Versioned application routes (require X-API-Key)
+  - url: /
+    description: Unversioned operational endpoints (/health, /ready, /metrics, /api-docs) -- no API key required
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /ingest/run:
+    post:
+      summary: Run the search -> extract -> validate -> store pipeline for a niche/platform
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+          description: >
+            Repeating the same key within IDEMPOTENCY_TTL_SECONDS replays the
+            original response instead of re-running the pipeline. A second
+            request with the same key while the first is in flight gets 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngestRunRequest"
+            example:
+              niche: "couple vlog"
+              platform: instagram
+      responses:
+        "200":
+          description: Pipeline run completed (individual candidates may still have been skipped)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestStats"
+              example:
+                requested: 12
+                extracted: 9
+                validated: 6
+                stored: 4
+                skippedDuplicates: 2
+        "400":
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid X-API-Key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A request with this Idempotency-Key is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: A downstream Python service returned an error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: A downstream Python service's circuit breaker is open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /creators:
+    get:
+      summary: Paginated list of stored creators
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Clamped to 100, not rejected, if a larger value is given
+        - in: query
+          name: niche
+          schema:
+            type: string
+        - in: query
+          name: platform
+          schema:
+            type: string
+            enum: [instagram, youtube, tiktok]
+      responses:
+        "200":
+          description: Paginated creators
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatorsPage"
+        "400":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid X-API-Key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /health:
+    get:
+      summary: Liveness probe -- process is up, no dependency checks
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /ready:
+    get:
+      summary: Readiness probe -- checks Postgres, Redis, and each Python service
+      security: []
+      responses:
+        "200":
+          description: All dependencies healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: At least one dependency is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+
+  /metrics:
+    get:
+      summary: Prometheus exposition format
+      security: []
+      responses:
+        "200":
+          description: Metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    IngestRunRequest:
+      type: object
+      required: [niche, platform]
+      properties:
+        niche:
+          type: string
+          minLength: 1
+          maxLength: 200
+        platform:
+          type: string
+          enum: [instagram, youtube, tiktok]
+
+    IngestStats:
+      type: object
+      properties:
+        requested:
+          type: integer
+        extracted:
+          type: integer
+        validated:
+          type: integer
+        stored:
+          type: integer
+        skippedDuplicates:
+          type: integer
+
+    CreatorsPage:
+      type: object
+      properties:
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CreatorSummary"
+
+    CreatorSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        handle:
+          type: string
+        platform:
+          type: string
+        niche:
+          type: string
+        email:
+          type: string
+          nullable: true
+        confidenceScore:
+          type: number
+          nullable: true
+
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              ok:
+                type: boolean
+              error:
+                type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: invalid_body
+            message:
+              type: string
+            details:
+              description: Present for validation errors (zod issue list)
+            requestId:
+              type: string
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: >
+        Required on every /api/v1/* route. One of the comma-separated values
+        in the API_KEYS env var. See docs/SECURITY.md for rotation.

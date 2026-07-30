@@ -1,0 +1,82 @@
+# Prometheus alerting rules for the MakeAble backend (apps/backend, /metrics).
+# Load via `rule_files:` in prometheus.yml. Assumes Prometheus is scraping
+# GET /metrics on the backend at a job named "makeable-backend" -- adjust
+# job="..." selectors if your scrape config uses a different job name.
+groups:
+  - name: makeable-backend.rules
+    rules:
+      - alert: MakeAbleHighErrorRate
+        expr: >
+          sum(rate(http_request_duration_seconds_count{job="makeable-backend", status=~"5.."}[5m]))
+          /
+          sum(rate(http_request_duration_seconds_count{job="makeable-backend"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MakeAble backend 5xx error rate above 5%"
+          description: "{{ $value | humanizePercentage }} of requests over the last 5m returned 5xx. Check /ready and recent deploys."
+
+      - alert: MakeAbleHighLatencyP99
+        expr: >
+          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="makeable-backend", route="/ingest/run"}[5m])) by (le))
+          > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency on /api/v1/ingest/run above 5s"
+          description: "p99 has been above 5s for 10m. Check circuit_breaker_state and db_query_duration_seconds for the bottleneck."
+
+      - alert: MakeAbleCircuitBreakerOpen
+        expr: circuit_breaker_state{job="makeable-backend"} == 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.service }}"
+          description: "{{ $labels.service }} has been failing fast for 2m+. Check that service's own health/logs directly -- see TROUBLESHOOTING.md."
+
+      - alert: MakeAbleReadinessFailing
+        # Requires a blackbox_exporter (or similar) probe of GET /ready --
+        # this repo doesn't run one itself. See OPERATIONS.md "Uptime monitoring".
+        expr: probe_http_status_code{job="makeable-backend-ready"} != 200
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GET /ready is failing"
+          description: "Readiness probe has failed for 3m+ -- a dependency (Postgres/Redis/a Python service) is down. Check the /ready response body for which one."
+
+      - alert: MakeAbleRedisFailuresSpike
+        expr: increase(redis_operation_failures_total{job="makeable-backend"}[5m]) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis operations failing (fail-open in effect)"
+          description: "{{ $value }} Redis operation failures for component={{ $labels.component }} in 5m. Rate limiting/duplicate-prevention are degraded, not blocked -- see docs/DATABASE.md."
+
+      - alert: MakeAbleSlowDatabaseQueries
+        expr: >
+          histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket{job="makeable-backend"}[5m])) by (le, model, operation))
+          > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 query duration for {{ $labels.model }}.{{ $labels.operation }} above 500ms"
+          description: "Sustained slow queries for 10m+. Check Supabase's query performance dashboard for this model/operation; consider whether an index is missing (see docs/DATABASE.md)."
+
+      - alert: MakeAbleIngestPipelineStalling
+        expr: >
+          sum(rate(ingest_stage_total{job="makeable-backend", stage="requested"}[15m])) > 0
+          and
+          sum(rate(ingest_stage_total{job="makeable-backend", stage="stored"}[15m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ingest pipeline is running but storing nothing"
+          description: "Candidates are being requested but none are reaching storage for 15m+ -- likely everything is failing extraction/validation/duplicate-checks. Check ingest_stage_total by stage in Grafana."

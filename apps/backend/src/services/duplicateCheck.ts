@@ -36,7 +36,7 @@ export class DuplicateChecker {
   }
 
   async markEmailSeen(email: string): Promise<void> {
-    await this.redis.set(emailKey(email), "1", "EX", env.cacheTtlSeconds);
+    await this.redis.set(emailKey(email), "1", "EX", env.duplicateTtlSeconds);
   }
 
   async isDuplicateWebsite(url: string): Promise<boolean> {
@@ -44,6 +44,6 @@ export class DuplicateChecker {
   }
 
   async markWebsiteSeen(url: string): Promise<void> {
-    await this.redis.set(websiteKey(url), "1", "EX", env.cacheTtlSeconds);
+    await this.redis.set(websiteKey(url), "1", "EX", env.duplicateTtlSeconds);
   }
 }

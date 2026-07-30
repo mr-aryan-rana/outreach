@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Never run against real Supabase/Upstash -- every job below uses local
+# placeholders only, matching the project's "no implicit .env / no live
+# credentials in automated runs" rule (see docs/TESTING.md, docs/SECURITY.md).
+env:
+  DATABASE_URL: postgresql://user:pass@localhost:5432/db
+  DIRECT_URL: postgresql://user:pass@localhost:5432/db
+  REDIS_URL: redis://localhost:6379
+
+jobs:
+  backend:
+    name: Backend (lint, typecheck, test, build, prisma check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/backend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test -- --ci
+      - run: npm run build
+      - name: Prisma schema/migration drift check
+        run: npm run prisma:check
+
+  python-services:
+    name: Python services (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [search, extractor, validator]
+    defaults:
+      run:
+        working-directory: apps/python/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: pip install pytest
+      - run: pytest -q

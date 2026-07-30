@@ -17,7 +17,9 @@ apps/python/validator   FastAPI service: syntax + MX + disposable-domain check
 apps/python/shared      email_utils.py shared by extractor and validator
 ```
 
-Full details: `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/API.md`.
+Full details: `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/API.md`, `DEPLOYMENT.md`, `OPERATIONS.md`, `TROUBLESHOOTING.md`.
+
+Interactive API docs: `GET /api-docs` (Swagger UI, served from `apps/backend/openapi.yaml`).
 
 ## Prerequisites
 
@@ -30,12 +32,26 @@ Full details: `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/API.md`.
 ```bash
 cp .env.example .env
 # Fill in DATABASE_URL / DIRECT_URL from Supabase and REDIS_URL from Upstash (see comments in .env.example)
+#
+# DATABASE_URL -> Supabase's pooled pgbouncer connection, port 6543, `?pgbouncer=true`.
+#                 Used at runtime by the backend. Get it from Supabase dashboard ->
+#                 Project Settings -> Database -> Connection string -> "Transaction" mode.
+# DIRECT_URL   -> Supabase's direct connection, port 5432, no pgbouncer.
+#                 Used ONLY by `prisma migrate`. Same dashboard page -> "Session" mode.
+# Mixing these up is a real, confirmed-live incident, not a theoretical warning: pointing
+# DATABASE_URL at the direct (5432) connection hits a hard `pool_size: 15` ceiling shared
+# with every other app on the same Supabase project -- see docs/DATABASE.md "Connection
+# pooling" and DEPLOYMENT.md "RC2 benchmark" for the reproduction.
+# Also set API_KEYS (comma-separated, e.g. `openssl rand -hex 32`) -- every /api/v1/*
+# request requires an X-API-Key header, see docs/API.md "Authentication".
 
 # Backend
 cd apps/backend
 npm install
 npx prisma migrate deploy   # applies the hand-authored initial migration -- see docs/DATABASE.md
 npx prisma db seed          # optional: one sample creator for local testing
+npm run lint                # eslint
+npm test                    # jest, ioredis-mock -- no live services required
 npm run dev
 
 # Python services (each in its own terminal / venv)
@@ -51,6 +67,7 @@ All routes live under `/api/v1`. `/health`, `/ready`, and `/metrics` are unversi
 ```bash
 curl -X POST http://localhost:4000/api/v1/ingest/run \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <one of your API_KEYS>" \
   -H "Idempotency-Key: <any-unique-string>" \
   -d '{"niche": "couple vlog", "platform": "instagram"}'
 ```
@@ -58,7 +75,7 @@ curl -X POST http://localhost:4000/api/v1/ingest/run \
 This calls search → extractor → validator (cached, retried, and circuit-broken per service — see `docs/ARCHITECTURE.md`), checks the Redis duplicate cache, and writes validated creators to Postgres. Repeating the same `Idempotency-Key` returns the original result instead of re-running the pipeline. List stored creators:
 
 ```bash
-curl http://localhost:4000/api/v1/creators?page=1
+curl http://localhost:4000/api/v1/creators?page=1 -H "X-API-Key: <one of your API_KEYS>"
 ```
 
 Operational endpoints:
@@ -72,6 +89,10 @@ curl http://localhost:4000/metrics   # Prometheus metrics
 ## Testing
 
 See `docs/TESTING.md`. Quick version: `npm test` in `apps/backend` runs everything against `ioredis-mock` (no live Redis/Postgres required); real-cloud integration tests are opt-in via `RUN_INTEGRATION_TESTS=true` and never auto-load any `.env` file.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push/PR: backend lint + typecheck + test + build + a Prisma schema/migration drift check (`npm run prisma:check`, offline — no live database), and `pytest` for each of the three Python services. Nothing in CI touches real Supabase/Upstash; every job uses local placeholder credentials.
 
 ## Why the old scripts are gone
 
