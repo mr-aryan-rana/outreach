@@ -1,6 +1,6 @@
-# MakeAble — Creator Discovery + AI Drafting Slice
+# MakeAble — Creator Discovery, AI Drafting, Email Delivery, and Admin Dashboard
 
-This repo implements the **Search → Extract → Validate → Store** pipeline plus **AI-generated outreach drafts** (creator summary, brand fit, subject/email/quality review) from `PROJECT.md`. Email sending, campaigns, and the frontend are **not implemented yet** — `apps/ai` saves drafts only, it never sends anything. See `PROJECT.md` for the full intended platform and `docs/ARCHITECTURE.md` for what's built so far.
+This repo implements the **Search → Extract → Validate → Store** pipeline, **AI-generated outreach drafts** (creator summary, brand fit, subject/email/quality review), an **approval-gated email delivery platform** (Draft → Review → Approve → Send), and an **internal admin dashboard/CRM** from `PROJECT.md`. Per-tenant/scoped auth is the only major piece **not implemented yet**. See `PROJECT.md` for the full intended platform and `docs/ARCHITECTURE.md` for what's built so far.
 
 ## Architecture
 
@@ -13,6 +13,18 @@ apps/ai            Node + TypeScript + Express + Prisma, standalone service
                    (own port, own Postgres schema) -- creator summary, brand
                    fit, email draft generation via OpenAI/Anthropic/Gemini.
                    Drafts only, never sends email. See docs/API.md "AI Service".
+
+apps/email         Node + TypeScript + Express + Prisma + BullMQ, standalone
+                   service (own port, own Postgres schema, two processes:
+                   API + worker) -- campaign management, approval-gated
+                   queueing, provider-adapter sending (mock/SMTP/Resend/SES/
+                   SendGrid), delivery event tracking, suppression. Never
+                   auto-sends a draft. See docs/API.md "Email Delivery Service".
+
+apps/admin         Next.js 15 + React 19 internal dashboard/CRM. No database
+                   of its own -- a client of the three services above, reached
+                   only through its own server-side API proxy (browser never
+                   holds a backend API key). See docs/API.md "Admin Dashboard".
 
 apps/python/search      FastAPI service: finds candidate creator profile/website URLs
 apps/python/extractor   FastAPI service: visits a URL, extracts email/social/bio
@@ -71,6 +83,25 @@ cp .env.example .env   # AI_DATABASE_URL/AI_DIRECT_URL: same Supabase project as
 npm install
 npx prisma migrate deploy
 npm run dev   # port 8004
+
+# Email delivery service (optional -- only needed for campaign/sending endpoints)
+cd apps/email
+cp .env.example .env.local   # or .env -- EMAIL_DATABASE_URL/EMAIL_DIRECT_URL (?schema=email),
+                              # AI_SERVICE_URL/AI_SERVICE_API_KEY, BACKEND_URL/BACKEND_API_KEY.
+                              # EMAIL_PROVIDER-per-sender-profile defaults to "mock" -- zero cost,
+                              # zero network, safe for local/CI. See docs/API.md "Email Delivery Service".
+npm install
+npx prisma migrate deploy
+npm run dev            # API, port 8005 -- only enqueues, never sends
+npm run worker          # separate process, required to actually send queued emails
+
+# Admin dashboard (optional -- Next.js UI for everything above)
+cd apps/admin
+cp .env.example .env.local   # BACKEND_URL/BACKEND_API_KEY, AI_SERVICE_URL/AI_SERVICE_API_KEY,
+                              # EMAIL_SERVICE_URL/EMAIL_SERVICE_API_KEY -- server-only, never
+                              # sent to the browser. See docs/API.md "Admin Dashboard".
+npm install
+npm run dev   # port 3000 (or next available) -- http://localhost:<port>/dashboard
 ```
 
 ## Running the pipeline
@@ -111,7 +142,7 @@ Runs the full pipeline (creator summary -> brand analysis -> creator analysis ->
 
 ## Testing
 
-See `docs/TESTING.md`. Quick version: `npm test` in `apps/backend` (and, separately, in `apps/ai`) runs everything against mocks (`ioredis-mock`, a deterministic zero-cost `MockProvider` for LLM calls — no live Redis/Postgres/AI-provider credentials required); real-cloud integration tests are opt-in via `RUN_INTEGRATION_TESTS=true` and never auto-load any `.env` file.
+See `docs/TESTING.md`. Quick version: `npm test` in `apps/backend`, `apps/ai`, and `apps/email` (each separately) runs everything against mocks (`ioredis-mock`, a deterministic zero-cost `MockProvider` for LLM/email-sending calls — no live Redis/Postgres/AI-provider/email-provider credentials required); real-cloud integration tests are opt-in via `RUN_INTEGRATION_TESTS=true` and never auto-load any `.env` file. `apps/admin` has its own `npm test` (Jest + React Testing Library, mocked API layer) and `npm run test:e2e` (Playwright, against the real running services with the `mock` email provider).
 
 ## CI
 

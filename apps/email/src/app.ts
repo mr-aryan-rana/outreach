@@ -9,6 +9,7 @@ import { apiKeyAuth } from "./middleware/apiKeyAuth";
 import { sendError } from "./middleware/errors";
 import { buildApiKeyRateLimiter, buildGeneralRateLimiter } from "./middleware/rateLimit";
 import { campaignsRouter } from "./routes/campaigns";
+import { creatorsRouter } from "./routes/creators";
 import { dashboardRouter } from "./routes/dashboard";
 import { emailEventsRouter } from "./routes/emailEvents";
 import { buildHealthRouter } from "./routes/health";
@@ -69,6 +70,7 @@ export function buildApp(deps: AppDeps): Express {
   v1.use(apiKeyAuth);
   v1.use(buildApiKeyRateLimiter(deps.redis));
   v1.use(campaignsRouter);
+  v1.use(creatorsRouter);
   v1.use(emailEventsRouter);
   v1.use(senderProfilesRouter);
   v1.use(suppressionRouter);

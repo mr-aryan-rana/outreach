@@ -1,3 +1,79 @@
+# Sprint 5 RC Report: Admin Dashboard & Creator CRM (apps/admin)
+
+## Status: COMPLETE, not tagged (feature sprint, not a version bump on its own)
+
+Sprint 5 built `apps/admin`, a Next.js 15 / React 19 internal dashboard/CRM covering all 12 requested pages (Dashboard, Creators, Creator Detail, AI Draft Review, Campaigns, Campaign Detail, Queue, Email Events, Suppression List, Sender Profiles, Analytics, Settings), on top of the three existing backend services. Per the task's own constraint ("use existing APIs only," "do not modify backend architecture unless a bug is found"), three small gaps were surfaced and resolved with the user before implementation began (see "Backend additions" below) rather than silently invented or silently skipped.
+
+## Understanding & Problems (Phase 1-2)
+
+The existing system exposed read/write APIs for creators, drafts, and campaigns, but had no UI and several gaps for CRM-style operations: no draft approve/reject/edit endpoint (drafts were create-only), no campaign pause/resume (only linear `pending_review → approved → queued → sending`), no way to retry a dead-lettered send, no way to list a creator's campaign history or AI summary, and no way to see prompt-version detail behind a generation. All three backend services were otherwise stable (Sprints 1-4 fully tested and live-verified) and required no bug fixes.
+
+## Solution Options considered for the API gaps
+
+- **Option A (minimal)**: build the UI against only the literal existing endpoints, disabling/hiding Reject, Pause/Resume, Retry, and any tab with no data source.
+- **Option B (recommended, chosen)**: add small, additive, single-purpose backend endpoints for the specific gaps blocking real features, following the same "small necessary additive endpoint" precedent already used repeatedly across Sprints 1-4 (`GET /creators/:id`, `GET /ai/drafts/:id`, etc.) — never touching the core pipeline/state-machine logic that already existed.
+- **Option C (full rebuild)**: design a proper aggregate/BFF (backend-for-frontend) layer. Rejected as disproportionate to a single admin tool at this scale.
+
+Option B was selected and confirmed with the user before implementation via `AskUserQuestion` (missing mutations: add minimal endpoints; Settings: read-only status view, not editable).
+
+## Backend additions (apps/ai, apps/email) -- all additive, all tested, all live-verified
+
+1. **`PATCH /api/v1/ai/drafts/:id`** (apps/ai) -- edit subject/body and/or set `status: draft|approved|rejected`, with `reviewedBy`/`reviewedAt` tracking. New nullable columns (`reviewedBy`, `reviewedAt`, `updatedAt`) added via non-destructive migration.
+2. **`GET /api/v1/ai/drafts`** (apps/ai) -- paginated/filterable draft list (previously only single-draft fetch existed).
+3. **`GET /api/v1/ai/summary/:creatorId`** (apps/ai) -- read a creator's stored AI summary (previously only regenerate-and-overwrite via `POST /ai/summary` existed).
+4. **`GET /api/v1/ai/prompts`** (apps/ai) -- read-only prompt template/version list, plus `promptVersion`/`output` added to `GET /ai/jobs/:id`'s generations for "compare prompt versions."
+5. **`POST /api/v1/campaigns/:id/{pause,resume}`** (apps/email) -- new `paused` state on the existing campaign state machine. Pause dequeues not-yet-active BullMQ jobs (in-flight sends finish naturally, never cancelled mid-send); resume re-enqueues everything still `queued` with the same spacing/priority logic as a fresh send. The worker was updated to treat a paused campaign's stray job as "skip, don't fail" rather than permanently marking the recipient `failed`.
+6. **`GET /api/v1/dashboard/queue/dlq`** + **`POST .../retry`** (apps/email) -- list and manually retry dead-lettered jobs (previously only an aggregate count existed, with no way to act on individual failures).
+7. **`GET /api/v1/creators/:creatorId/campaign-history`** (apps/email) -- campaign history for a creator (new index on `campaign_recipients.creatorId`, non-destructive migration).
+
+None of these touch the existing safety boundaries: `sendCampaign()`'s approval gate, suppression double-check, and dedupe constraint are unchanged; draft approve/reject is explicitly **review-tracking only** in this slice -- `apps/email` does not yet refuse to send a `rejected` draft (documented as a known gap in `docs/SECURITY.md`, not silently assumed safe).
+
+## Architecture
+
+`apps/admin` holds no backend API key client-side. Every data request from a client component goes through this app's own Next.js Route Handlers (`src/app/api/proxy/{backend,ai,email}/[...path]/route.ts`), which attach the correct service's API key server-side (`server-only`-guarded `src/lib/serverEnv.ts`) and do not forward the browser's own cookies/headers downstream. Stack: TanStack Query (server state), React Hook Form + Zod (form validation), shadcn/ui on Base UI (not Radix), Recharts (Analytics), next-themes (dark mode). Full diagram in `docs/ARCHITECTURE.md` "Admin dashboard".
+
+A few views compose multiple existing calls rather than requiring a new aggregate endpoint (Dashboard KPIs, the Create Campaign recipient picker joining approved drafts with creator emails, the Analytics funnel summing per-campaign `recipientCounts`) -- acceptable at this scale, documented as needing a real aggregate endpoint if campaign count grows into the hundreds (`docs/API.md` "Admin Dashboard").
+
+## Tests
+
+- **Backend regression tests**: 169/169 passing across apps/backend (46), apps/ai (52, +8 new), apps/email (71, +27 new, including 4 for the rate-limiter fix below) -- lint/typecheck/build clean, `npm audit --omit=dev` clean on all three. Python services unaffected: 31/31 (search 10, extractor 14, validator 7).
+- **apps/admin component tests** (Jest + React Testing Library): 21/21 -- format utilities, `StatusBadge`, `SimplePager`, `EmptyState`, and a full Suppression List page integration test (list/empty-state rendering, Zod form validation blocking bad input, successful submission calling the mocked API with correct args).
+- **apps/admin E2E tests** (Playwright, against the real running services with the `mock` provider): 21/21 -- every page loads and shows its heading, root redirects to `/dashboard`, no uncaught console errors, sidebar navigation, mobile responsive layout + hamburger menu, dark mode toggle, Cmd/Ctrl+K command palette (both keyboard and button-triggered), the "g then letter" navigation shortcut, and a full Suppression List add/validate flow.
+- **Live smoke test through the admin app's own proxy** (not just direct service calls): created a test creator, generated a draft via the real AI pipeline (mock provider, ~16s for the full 8-stage pipeline), approved it, created a sender profile and campaign, approved and sent it, paused and resumed a second campaign mid-send (verified 3/3 recipients correctly dequeued then re-sent), and queried the new campaign-history/prompts/summary endpoints -- all through `/api/proxy/*`, confirming the server-side API-key-injection path works end to end, not just the direct backend routes. All test data cleaned up afterward.
+
+## Real bugs found and fixed during this sprint
+
+1. **`next.js` proxy timeout too short for the AI pipeline**: `apps/admin`'s server-side proxy defaulted to a 20s upstream timeout; the AI draft pipeline (8 sequential stages, each its own provider call + retry/circuit-breaker policy) measured ~16-20s live even with the zero-cost mock provider. Raised to 60s after live-reproducing the timeout, not guessed.
+2. **`CommandDialog` (generated shadcn `command.tsx`) never wrapped its children in cmdk's own `<Command>` root component** -- `CommandInput`/`CommandList` crashed with `TypeError: Cannot read properties of undefined (reading 'subscribe')` the instant the dialog opened (caught silently by a React error boundary, so the dialog just appeared to do nothing). Found via Playwright, not manual clicking -- the crash only threw inside the portal-rendered dialog tree, easy to miss without automated assertions on dialog content. Fixed by wrapping `{children}` in `<Command>`.
+3. **`CommandDialog`'s generated JSX had its `DialogHeader` positioned as a sibling of `DialogContent` instead of nested inside it** -- a malformed-but-technically-compiling structure that intermittently broke click-event delegation across the whole page (unrelated E2E tests -- theme toggle, "g then c" shortcut -- failed inconsistently until this was fixed, since Base UI's dialog portal machinery got confused by the header being outside its content boundary). Fixed by moving `DialogHeader` inside `DialogContent`, matching every other dialog usage in the app.
+
+Both (2) and (3) are exactly the kind of defect that curl/API-level verification cannot catch — they only manifest in real DOM/event handling, which is why Playwright E2E was run to completion rather than treated as optional given the time cost.
+
+4. **`RedisFixedWindowStore`'s rate limiter could get permanently stuck with no reset, in all three Node services** -- found live while re-running the E2E suite: the Suppression List E2E test started failing with `429 rate_limited` and stayed failing well past the configured 60s window. Inspecting Redis directly (`docs/DATABASE.md` "Redis keys") showed `email:ratelimit:apikey:*` and `email:ratelimit:general:*` keys with `totalHits` in the dozens/hundreds but **no TTL at all** (`PTTL` returned `-1`, meaning the key would never expire). Root cause: the store only calls `PEXPIRE` when `totalHits === 1` (the literal first hit ever for that key) -- under the heavy repeated-restart, heavy-traffic conditions of this session's testing, a key ended up with hits recorded but its TTL never (re-)armed, permanently rate-limiting that IP/API key until a human manually cleared Redis. This is the exact same `RedisFixedWindowStore` implementation, duplicated verbatim in `apps/backend`, `apps/ai`, and `apps/email` (introduced in RC1, carried into every subsequent sprint) -- fixed in all three: `increment()` now re-arms the TTL any time `PTTL` reports it's missing (`ttl < 0`), not only on the request that happens to create the key. Added a dedicated unit test suite for the store (`apps/email/tests/middleware/rateLimit.test.ts`, 4 tests including a direct regression test reproducing the stuck-key scenario) since none existed for this logic in any of the three services before. This was a real, live-reproduced production risk (a legitimate caller permanently locked out) that predates Sprint 5 but was only surfaced by this sprint's sustained E2E testing load -- not something curl-based smoke testing in earlier sprints exercised hard enough to trigger.
+
+This finding is a good illustration of why the RC report distinguishes "tests pass" from "verified live": all three services' existing rate-limit tests (checking headers exist, checking `ERR_ERL_DOUBLE_COUNT` doesn't recur) passed throughout every prior sprint without ever exercising this path.
+
+## Explicit rules verified
+
+- **No backend architecture changes beyond additive endpoints**: `sendCampaign()`'s approval gate, suppression re-check, and dedupe constraint are byte-for-byte unchanged; new endpoints only add new routes/columns, never alter existing behavior.
+- **Draft/campaign safety unchanged**: pause/resume cannot bypass the approval gate (only reachable from `queued`/`sending`, which are only reachable after `approved`); a paused campaign's in-flight sends are never force-cancelled mid-delivery.
+- **No client-side secrets**: verified by design (proxy pattern) and by code review of every `src/app/api/proxy/*` route -- confirmed no API key construction happens in any `"use client"` file.
+- **Settings is read-only**: no PATCH/POST exists anywhere in Settings; it only calls `GET /ready` (×3 services), `GET /sender-profiles`, and `GET /ai/prompts`.
+
+## Risks / known gaps (carried forward explicitly)
+
+- `apps/admin` has no login/user identity yet -- must be deployed behind existing network/VPN access control, not exposed publicly (`docs/SECURITY.md` "Known operational limits").
+- Draft approve/reject is review-tracking only; `apps/email` doesn't yet refuse to send a `rejected` draft if a campaign is created against it directly.
+- Analytics' cross-campaign funnel is N+1 (one status call per campaign, capped at 50) -- fine at admin-tool scale, would need a real aggregate endpoint before hundreds of campaigns.
+- No automated accessibility audit tool was run (axe-core etc.) -- a11y was addressed via semantic markup, `aria-label`s, focus-visible rings, a skip-to-content link, and status badges that pair color with text, but not machine-verified against WCAG criteria.
+- UI was verified via Playwright (real browser, real DOM assertions) and manual API-level proxy checks, not a human visually reviewing every screen in a browser window -- no browser-screenshot tool was available in this environment. Flagged explicitly rather than claimed as full visual QA.
+
+## Recommendation: GO for internal/mock-provider use behind existing network access control; NOT YET for public exposure
+
+Every explicitly requested page and feature is implemented, tested at both the component and E2E level, and live-verified end to end through the app's own proxy layer with zero client-side secrets. The two E2E-discovered bugs were real, would have shipped silently, and are now fixed with passing regression coverage. Remaining gaps (no admin-app login, draft-status not yet a cross-service send gate) are pre-existing, explicitly-scoped limitations consistent with "internal tool behind existing access control," not defects introduced by this work.
+
+---
+
 # Sprint 4 RC Report: Email Delivery Platform (apps/email)
 
 ## Status: COMPLETE, not tagged (feature sprint, not a version bump on its own — see "Versioning going forward" below)

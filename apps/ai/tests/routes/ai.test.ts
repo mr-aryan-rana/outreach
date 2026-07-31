@@ -1,7 +1,9 @@
 jest.mock("../../src/db", () => ({
   prisma: {
     aiJob: { findUnique: jest.fn() },
-    draftEmail: { findUnique: jest.fn() },
+    draftEmail: { findUnique: jest.fn(), findMany: jest.fn(), count: jest.fn(), update: jest.fn() },
+    promptTemplate: { findMany: jest.fn() },
+    creatorSummary: { findUnique: jest.fn() },
   },
 }));
 
@@ -189,5 +191,151 @@ describe("GET /api/v1/ai/drafts/:id", () => {
     expect(res.body.subject).toBe("Hello");
     expect(res.body.body).toBe("Body text");
     expect(res.body.status).toBe("draft");
+  });
+});
+
+describe("GET /api/v1/ai/drafts", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("lists drafts, filterable by status", async () => {
+    (prisma.draftEmail.count as jest.Mock).mockResolvedValue(1);
+    (prisma.draftEmail.findMany as jest.Mock).mockResolvedValue([
+      { id: VALID_JOB_ID, creatorId: VALID_CREATOR_ID, jobId: "job1", subject: "Hi", brandFitScore: 0.5, qualityScore: 0.5, status: "draft", reviewedBy: null, reviewedAt: null, createdAt: new Date() },
+    ]);
+    const { app } = buildTestApp();
+    const res = await request(app)
+      .get("/api/v1/ai/drafts?status=draft")
+      .set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(prisma.draftEmail.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { status: "draft" } })
+    );
+  });
+});
+
+describe("PATCH /api/v1/ai/drafts/:id", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("rejects an empty body", async () => {
+    const { app } = buildTestApp();
+    const res = await request(app)
+      .patch(`/api/v1/ai/drafts/${VALID_JOB_ID}`)
+      .set("X-API-Key", TEST_API_KEY)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 for an unknown draft", async () => {
+    (prisma.draftEmail.findUnique as jest.Mock).mockResolvedValue(null);
+    const { app } = buildTestApp();
+    const res = await request(app)
+      .patch(`/api/v1/ai/drafts/${VALID_JOB_ID}`)
+      .set("X-API-Key", TEST_API_KEY)
+      .send({ status: "approved" });
+    expect(res.status).toBe(404);
+  });
+
+  it("approves a draft and records who reviewed it", async () => {
+    (prisma.draftEmail.findUnique as jest.Mock).mockResolvedValue({ id: VALID_JOB_ID, status: "draft" });
+    (prisma.draftEmail.update as jest.Mock).mockResolvedValue({
+      id: VALID_JOB_ID,
+      creatorId: VALID_CREATOR_ID,
+      jobId: "job1",
+      subject: "Hi",
+      body: "Body",
+      brandFitScore: 0.5,
+      qualityScore: 0.5,
+      qualityNotes: null,
+      status: "approved",
+      reviewedBy: "jane@makeable.example",
+      reviewedAt: new Date(),
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    });
+    const { app } = buildTestApp();
+    const res = await request(app)
+      .patch(`/api/v1/ai/drafts/${VALID_JOB_ID}`)
+      .set("X-API-Key", TEST_API_KEY)
+      .set("X-Reviewed-By", "jane@makeable.example")
+      .send({ status: "approved" });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("approved");
+    expect(prisma.draftEmail.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "approved", reviewedBy: "jane@makeable.example" }),
+      })
+    );
+  });
+
+  it("edits subject/body without touching review status", async () => {
+    (prisma.draftEmail.findUnique as jest.Mock).mockResolvedValue({ id: VALID_JOB_ID, status: "draft" });
+    (prisma.draftEmail.update as jest.Mock).mockResolvedValue({
+      id: VALID_JOB_ID,
+      creatorId: VALID_CREATOR_ID,
+      jobId: "job1",
+      subject: "Edited subject",
+      body: "Body",
+      status: "draft",
+      reviewedBy: null,
+      reviewedAt: null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+    });
+    const { app } = buildTestApp();
+    const res = await request(app)
+      .patch(`/api/v1/ai/drafts/${VALID_JOB_ID}`)
+      .set("X-API-Key", TEST_API_KEY)
+      .send({ subject: "Edited subject" });
+    expect(res.status).toBe(200);
+    expect(prisma.draftEmail.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { subject: "Edited subject" } })
+    );
+  });
+});
+
+describe("GET /api/v1/ai/summary/:creatorId", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("returns 404 when no summary has been generated yet", async () => {
+    (prisma.creatorSummary.findUnique as jest.Mock).mockResolvedValue(null);
+    const { app } = buildTestApp();
+    const res = await request(app).get(`/api/v1/ai/summary/${VALID_CREATOR_ID}`).set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns the stored summary", async () => {
+    (prisma.creatorSummary.findUnique as jest.Mock).mockResolvedValue({
+      id: "s1",
+      creatorId: VALID_CREATOR_ID,
+      summary: "A vegan cooking creator.",
+      keyThemes: ["vegan", "cooking"],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const { app } = buildTestApp();
+    const res = await request(app).get(`/api/v1/ai/summary/${VALID_CREATOR_ID}`).set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toBe("A vegan cooking creator.");
+    expect(res.body.keyThemes).toEqual(["vegan", "cooking"]);
+  });
+});
+
+describe("GET /api/v1/ai/prompts", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("returns templates with their versions", async () => {
+    (prisma.promptTemplate.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: "t1",
+        name: "creator-summary",
+        versions: [{ id: "v1", version: 1, content: "...", variables: ["bio"], isActive: true, createdAt: new Date() }],
+      },
+    ]);
+    const { app } = buildTestApp();
+    const res = await request(app).get("/api/v1/ai/prompts").set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].versions).toHaveLength(1);
   });
 });

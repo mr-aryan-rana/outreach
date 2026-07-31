@@ -35,6 +35,18 @@ export async function processSendJob(job: Job<EmailSendJobData>): Promise<void> 
     include: { campaign: { include: { senderProfile: true } } },
   });
 
+  // Paused (see services/campaignService.ts pauseCampaign()) is a distinct
+  // case from "never approved" -- pauseCampaign() best-effort removes queued
+  // BullMQ jobs, but a job that was already "active" when pause ran cannot
+  // be safely cancelled mid-send and reaches here anyway. Leave the
+  // recipient exactly as-is (still "queued") so resumeCampaign() re-enqueues
+  // it -- do NOT mark it "failed", that would be a permanent, wrong outcome
+  // for a recipient that simply hasn't been sent yet.
+  if (recipient.campaign.status === "paused") {
+    logger.warn({ event: "send_skipped_campaign_paused", campaignId: recipient.campaignId });
+    return;
+  }
+
   if (!["approved", "queued", "sending"].includes(recipient.campaign.status)) {
     logger.warn({ event: "send_skipped_campaign_not_approved", campaignId: recipient.campaignId, status: recipient.campaign.status });
     await prisma.campaignRecipient.update({ where: { id: recipient.id }, data: { status: "failed" } });

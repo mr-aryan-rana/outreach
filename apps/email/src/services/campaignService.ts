@@ -1,7 +1,7 @@
 import { prisma } from "../db";
 import { env } from "../config/env";
 import { emailDuplicateSkippedTotal, emailSuppressedTotal } from "./metrics";
-import { enqueueSend } from "../queue/emailQueue";
+import { enqueueSend, getEmailSendQueue } from "../queue/emailQueue";
 
 export class InvalidStateTransitionError extends Error {
   constructor(from: string, action: string) {
@@ -98,19 +98,16 @@ export async function approveCampaign(campaignId: string, approvedBy: string) {
  * satisfying requirement #2's "priority" without needing per-recipient
  * caller-supplied priority in this slice.
  */
-export async function sendCampaign(campaignId: string) {
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
-  if (campaign.status !== "approved") {
-    throw new InvalidStateTransitionError(campaign.status, "send");
-  }
-
-  const recipients = await prisma.campaignRecipient.findMany({
-    where: { campaignId, status: "pending" },
-    orderBy: { createdAt: "asc" },
-  });
-
-  await prisma.campaign.update({ where: { id: campaignId }, data: { status: "queued", sendStartedAt: new Date() } });
-
+/**
+ * Shared by sendCampaign() and resumeCampaign() -- spaces each recipient's
+ * enqueue delay per EMAIL_DELAY_MIN/MAX + MAX_EMAILS_PER_HOUR and gives
+ * earlier recipients higher BullMQ priority. Callers are responsible for
+ * the campaign-status transition; this only touches campaign_recipients and
+ * the queue.
+ */
+async function enqueueRecipients(
+  recipients: { id: string }[]
+): Promise<number> {
   const delayStepMs = Math.max(env.emailDelayMinSeconds, 1) * 1000;
   let cumulativeDelayMs = 0;
   let enqueuedCount = 0;
@@ -140,6 +137,82 @@ export async function sendCampaign(campaignId: string) {
       cumulativeDelayMs += 3600_000;
     }
   }
+
+  return enqueuedCount;
+}
+
+export async function sendCampaign(campaignId: string) {
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+  if (campaign.status !== "approved") {
+    throw new InvalidStateTransitionError(campaign.status, "send");
+  }
+
+  const recipients = await prisma.campaignRecipient.findMany({
+    where: { campaignId, status: "pending" },
+    orderBy: { createdAt: "asc" },
+  });
+
+  await prisma.campaign.update({ where: { id: campaignId }, data: { status: "queued", sendStartedAt: new Date() } });
+
+  const enqueuedCount = await enqueueRecipients(recipients);
+
+  return { campaignId, enqueued: enqueuedCount };
+}
+
+/**
+ * Pause a campaign that's actively queued/sending. Removes not-yet-picked-up
+ * BullMQ jobs for this campaign's still-"queued" recipients (a job already
+ * "active" -- being processed by the worker right now -- cannot be safely
+ * cancelled mid-send, and is left to finish naturally; see
+ * docs/API.md "Campaigns"). Those recipients stay "queued" in the DB so
+ * resumeCampaign() knows exactly who still needs to go out.
+ */
+export async function pauseCampaign(campaignId: string) {
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+  if (!["queued", "sending"].includes(campaign.status)) {
+    throw new InvalidStateTransitionError(campaign.status, "pause");
+  }
+
+  const queue = getEmailSendQueue();
+  const stillQueued = await prisma.campaignRecipient.findMany({
+    where: { campaignId, status: "queued" },
+    select: { id: true, queueJobId: true },
+  });
+
+  let removedCount = 0;
+  for (const recipient of stillQueued) {
+    if (!recipient.queueJobId) continue;
+    const job = await queue.getJob(recipient.queueJobId);
+    if (!job) continue;
+    const state = await job.getState();
+    if (state === "active") continue; // already being sent -- let it finish
+    await job.remove();
+    removedCount += 1;
+  }
+
+  const updated = await prisma.campaign.update({ where: { id: campaignId }, data: { status: "paused" } });
+  return { campaign: updated, dequeued: removedCount, stillInFlight: stillQueued.length - removedCount };
+}
+
+/**
+ * Resume a paused campaign: re-enqueues every recipient still "queued"
+ * (never sent while paused) using the same spacing/priority logic as a
+ * fresh send. Recipients that already reached a terminal status while the
+ * campaign was paused (e.g. an in-flight send that completed) are untouched.
+ */
+export async function resumeCampaign(campaignId: string) {
+  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+  if (campaign.status !== "paused") {
+    throw new InvalidStateTransitionError(campaign.status, "resume");
+  }
+
+  const recipients = await prisma.campaignRecipient.findMany({
+    where: { campaignId, status: "queued" },
+    orderBy: { createdAt: "asc" },
+  });
+
+  await prisma.campaign.update({ where: { id: campaignId }, data: { status: "queued" } });
+  const enqueuedCount = await enqueueRecipients(recipients);
 
   return { campaignId, enqueued: enqueuedCount };
 }

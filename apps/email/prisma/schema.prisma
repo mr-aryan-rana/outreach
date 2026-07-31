@@ -89,6 +89,7 @@ model CampaignRecipient {
   @@unique([campaignId, email])
   @@index([campaignId, status])
   @@index([email])
+  @@index([creatorId])
   @@map("campaign_recipients")
 }
 

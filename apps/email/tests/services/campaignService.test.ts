@@ -8,14 +8,17 @@ jest.mock("../../src/db", () => ({
 
 jest.mock("../../src/queue/emailQueue", () => ({
   enqueueSend: jest.fn(),
+  getEmailSendQueue: jest.fn(),
 }));
 
 import { prisma } from "../../src/db";
-import { enqueueSend } from "../../src/queue/emailQueue";
+import { enqueueSend, getEmailSendQueue } from "../../src/queue/emailQueue";
 import {
   approveCampaign,
   createCampaign,
   InvalidStateTransitionError,
+  pauseCampaign,
+  resumeCampaign,
   sendCampaign,
 } from "../../src/services/campaignService";
 
@@ -150,5 +153,74 @@ describe("sendCampaign -- the core 'never send without approval' gate", () => {
     const [firstCallArgs, secondCallArgs] = (enqueueSend as jest.Mock).mock.calls;
     expect(firstCallArgs[1].delayMs).toBeGreaterThan(0);
     expect(secondCallArgs[1].delayMs).toBeGreaterThan(firstCallArgs[1].delayMs);
+  });
+});
+
+describe("pauseCampaign", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it.each(["draft", "pending_review", "approved", "paused", "completed"])(
+    "refuses to pause a campaign in status %s",
+    async (status) => {
+      (prisma.campaign.findUniqueOrThrow as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status });
+      await expect(pauseCampaign(CAMPAIGN_ID)).rejects.toThrow(InvalidStateTransitionError);
+    }
+  );
+
+  it("removes not-yet-active queued jobs and leaves active ones alone", async () => {
+    (prisma.campaign.findUniqueOrThrow as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status: "queued" });
+    (prisma.campaignRecipient.findMany as jest.Mock).mockResolvedValue([
+      { id: "r1", queueJobId: "job1" },
+      { id: "r2", queueJobId: "job2" },
+    ]);
+    const removableJob = { getState: jest.fn().mockResolvedValue("delayed"), remove: jest.fn().mockResolvedValue(undefined) };
+    const activeJob = { getState: jest.fn().mockResolvedValue("active"), remove: jest.fn().mockResolvedValue(undefined) };
+    (getEmailSendQueue as jest.Mock).mockReturnValue({
+      getJob: jest.fn().mockImplementation((id: string) => (id === "job1" ? removableJob : activeJob)),
+    });
+    (prisma.campaign.update as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status: "paused" });
+
+    const result = await pauseCampaign(CAMPAIGN_ID);
+
+    expect(removableJob.remove).toHaveBeenCalled();
+    expect(activeJob.remove).not.toHaveBeenCalled();
+    expect(result.dequeued).toBe(1);
+    expect(result.stillInFlight).toBe(1);
+    expect(prisma.campaign.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: "paused" } })
+    );
+  });
+});
+
+describe("resumeCampaign", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it.each(["draft", "pending_review", "approved", "queued", "sending", "completed"])(
+    "refuses to resume a campaign in status %s",
+    async (status) => {
+      (prisma.campaign.findUniqueOrThrow as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status });
+      await expect(resumeCampaign(CAMPAIGN_ID)).rejects.toThrow(InvalidStateTransitionError);
+      expect(enqueueSend).not.toHaveBeenCalled();
+    }
+  );
+
+  it("re-enqueues every still-queued recipient", async () => {
+    (prisma.campaign.findUniqueOrThrow as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status: "paused" });
+    (prisma.campaignRecipient.findMany as jest.Mock).mockResolvedValue([
+      { id: "r1", createdAt: new Date() },
+    ]);
+    (prisma.campaign.update as jest.Mock).mockResolvedValue({});
+    (prisma.campaignRecipient.update as jest.Mock).mockResolvedValue({});
+    (enqueueSend as jest.Mock).mockResolvedValue({ id: "job3" });
+
+    const result = await resumeCampaign(CAMPAIGN_ID);
+
+    expect(result.enqueued).toBe(1);
+    expect(prisma.campaignRecipient.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { campaignId: CAMPAIGN_ID, status: "queued" } })
+    );
+    expect(prisma.campaign.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: "queued" } })
+    );
   });
 });

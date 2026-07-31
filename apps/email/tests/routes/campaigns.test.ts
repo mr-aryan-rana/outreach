@@ -10,6 +10,8 @@ jest.mock("../../src/services/campaignService", () => ({
   createCampaign: jest.fn(),
   approveCampaign: jest.fn(),
   sendCampaign: jest.fn(),
+  pauseCampaign: jest.fn(),
+  resumeCampaign: jest.fn(),
 }));
 
 import request from "supertest";
@@ -18,6 +20,8 @@ import {
   approveCampaign,
   createCampaign,
   InvalidStateTransitionError,
+  pauseCampaign,
+  resumeCampaign,
   sendCampaign,
 } from "../../src/services/campaignService";
 import { buildTestApp, TEST_API_KEY } from "../testApp";
@@ -102,6 +106,40 @@ describe("POST /api/v1/campaigns/:id/send -- Sending Rules gate", () => {
     const res = await request(app).post(`/api/v1/campaigns/${CAMPAIGN_ID}/send`).set("X-API-Key", TEST_API_KEY);
     expect(res.status).toBe(200);
     expect(res.body.enqueued).toBe(3);
+  });
+});
+
+describe("POST /api/v1/campaigns/:id/pause and /resume", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("returns 409 for pausing a campaign not currently queued/sending", async () => {
+    (pauseCampaign as jest.Mock).mockRejectedValue(new InvalidStateTransitionError("approved", "pause"));
+    const { app } = buildTestApp();
+    const res = await request(app).post(`/api/v1/campaigns/${CAMPAIGN_ID}/pause`).set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(409);
+  });
+
+  it("pauses a sending campaign", async () => {
+    (pauseCampaign as jest.Mock).mockResolvedValue({ campaign: { id: CAMPAIGN_ID, status: "paused" }, dequeued: 2, stillInFlight: 0 });
+    const { app } = buildTestApp();
+    const res = await request(app).post(`/api/v1/campaigns/${CAMPAIGN_ID}/pause`).set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.dequeued).toBe(2);
+  });
+
+  it("returns 409 for resuming a campaign that isn't paused", async () => {
+    (resumeCampaign as jest.Mock).mockRejectedValue(new InvalidStateTransitionError("queued", "resume"));
+    const { app } = buildTestApp();
+    const res = await request(app).post(`/api/v1/campaigns/${CAMPAIGN_ID}/resume`).set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(409);
+  });
+
+  it("resumes a paused campaign", async () => {
+    (resumeCampaign as jest.Mock).mockResolvedValue({ campaignId: CAMPAIGN_ID, enqueued: 4 });
+    const { app } = buildTestApp();
+    const res = await request(app).post(`/api/v1/campaigns/${CAMPAIGN_ID}/resume`).set("X-API-Key", TEST_API_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.enqueued).toBe(4);
   });
 });
 

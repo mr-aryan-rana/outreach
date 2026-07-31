@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes what is **actually implemented**. For the full target platform (frontend, per-tenant auth), see `PROJECT.md` — those pieces do not exist in code yet. API key authentication (flat/global, not per-tenant) exists — see "Platform hardening" below and `docs/API.md`. The AI service (`apps/ai`, Sprint 3) exists and generates drafts only — see "AI pipeline" below; it never sends email and has no campaign/automation logic. The email delivery service (`apps/email`, Sprint 4) exists — see "Email delivery pipeline" below; it never sends without an explicit human approval step and has no reply automation.
+This document describes what is **actually implemented**. For the full target platform (per-tenant auth), see `PROJECT.md` — that piece does not exist in code yet. API key authentication (flat/global, not per-tenant) exists — see "Platform hardening" below and `docs/API.md`. The AI service (`apps/ai`, Sprint 3) exists and generates drafts only — see "AI pipeline" below; it never sends email and has no campaign/automation logic. The email delivery service (`apps/email`, Sprint 4) exists — see "Email delivery pipeline" below; it never sends without an explicit human approval step and has no reply automation. The admin dashboard (`apps/admin`, Sprint 5) exists — see "Admin dashboard" below; it is a client of the three backend services, not a fourth backend service (no database of its own).
 
 ## Data flow
 
@@ -115,6 +115,25 @@ GET /health, /ready, /metrics                                   (apps/email, unv
 
 Provider adapters (`apps/email/src/providers/`) mirror `apps/ai`'s pattern exactly: a minimal interface (`send()`), a `registry.ts` resolving by name, one file per provider, and a `MockEmailProvider` default that makes zero network calls -- used for every automated test and all live verification performed in this repo. See `docs/API.md` "Email Delivery Service" for the full endpoint reference, and `docs/SECURITY.md` for the webhook-authentication gap and the sending-without-approval prevention this pipeline is built around.
 
+## Admin dashboard (apps/admin, Sprint 5)
+
+Next.js 15 / React 19 App Router web app, TanStack Query for server state, React Hook Form + Zod for form validation, shadcn/ui (Base UI-backed, not Radix) for components, Recharts for the Analytics funnel. Not a fourth backend service -- no database, no schema, no business logic of its own. Every page is a client of `apps/backend`/`apps/ai`/`apps/email` over HTTP, reached exclusively through this app's own server-side proxy:
+
+```
+Browser (client component)
+  │  fetch("/api/proxy/<service>/<path>")           -- same-origin, no API key
+  ▼
+Next.js Route Handler (src/app/api/proxy/<service>/[...path]/route.ts)
+  │  attaches X-API-Key from server-only env (src/lib/serverEnv.ts, "server-only" import)
+  │  forwards method/path/query/body, does NOT forward incoming cookies/auth
+  ▼
+apps/backend | apps/ai | apps/email   (real service, real data, mock or real providers)
+```
+
+This is the same "browser never holds a backend credential" principle as every other cross-service boundary in this repo, applied to a UI instead of another API. See `docs/API.md` "Admin Dashboard" for the full proxy route list, composed-view endpoints (KPIs, campaign-recipient-email joins, analytics funnel) that reuse existing endpoints rather than adding aggregate ones, and what Playwright E2E testing found and fixed this sprint (two real bugs in generated shadcn `Command`/`Dialog` composition that silently broke click handling and crashed the command palette -- see the Sprint 5 RC report in `RELEASE.md`).
+
+Three small **additive, read-mostly** backend endpoints were added specifically to back this UI (not architecture changes): `PATCH /ai/drafts/:id` (human approve/reject/edit, review-tracking only -- `apps/email` does not gate sending on it), `POST /campaigns/:id/{pause,resume}` (dequeue/re-enqueue, same safety model as the existing send gate), and `GET /dashboard/queue/dlq` + `POST .../retry` (surface + manually retry dead-lettered jobs). Full list in `docs/API.md`.
+
 ## Resilience layer
 
 Each of the three HTTP calls to the Python services (`apps/backend/src/services/pipeline.ts`) is wrapped in a `cockatiel` policy (`apps/backend/src/services/resilience.ts`), one breaker instance per downstream service:
@@ -150,9 +169,10 @@ When a breaker is open, the call fails immediately with `BrokenCircuitError` ins
 | `apps/backend` | All business logic, Postgres, Redis, API, orchestration | Never runs its own search/scrape logic — delegates to the Python services |
 | `apps/ai` | Creator summaries, brand-fit analysis, email draft generation via LLM providers | Never sends email, never touches `apps/backend`'s tables directly (reads creator data over HTTP), no campaign/automation logic |
 | `apps/email` | Campaign/recipient management, approval-gated queueing, provider-adapter sending, delivery event tracking, suppression | Never auto-sends a draft, never approves its own campaigns, never automates replies, never generates AI content (reads drafts from `apps/ai` over HTTP) |
+| `apps/admin` | Internal dashboard/CRM UI: creator browsing, draft review, campaign management, queue/analytics visibility | No business logic or persistence of its own -- every action is a proxied call to one of the three services above; never holds a backend API key client-side |
 
-This split matches PROJECT.md §7 exactly: Python services are stateless and read-only; the Node backend owns all persistence and business rules; `apps/ai` owns only its own AI-specific tables (`docs/DATABASE.md` "AI schema isolation") and reaches creator data through the backend's API, never its database; `apps/email` owns only its own delivery-specific tables and reaches draft content through `apps/ai`'s API, never its database.
+This split matches PROJECT.md §7 exactly: Python services are stateless and read-only; the Node backend owns all persistence and business rules; `apps/ai` owns only its own AI-specific tables (`docs/DATABASE.md` "AI schema isolation") and reaches creator data through the backend's API, never its database; `apps/email` owns only its own delivery-specific tables and reaches draft content through `apps/ai`'s API, never its database; `apps/admin` owns no tables at all and reaches all three backend services only through its own server-side proxy (`docs/API.md` "Admin Dashboard").
 
 ## Explicitly not built yet
 
-Next.js frontend, per-tenant/scoped auth (today's API keys are flat/global), automatic mass sending (`apps/email` requires per-campaign human approval for every send, by design -- see PROJECT.md's non-goals), reply automation (replies are marked manually via `POST /campaigns/:id/recipients/:recipientId/mark-replied`, never detected/acted on automatically), a "sweep completed campaigns" job (`campaign.status` doesn't automatically reach `"completed"` -- see `DEPLOYMENT.md` "Known operational limits"), per-provider webhook HMAC signature verification (`docs/SECURITY.md` "Webhook authentication"), SES/SNS bounce event parsing (`docs/API.md`). `apps/backend`'s ingest pipeline and `apps/ai`'s pipeline stages both still run synchronously within the request, not via a queue -- `apps/email` is the only service with a queue (BullMQ) so far. Do not assume any of the above exists when reasoning about the system. AI personalization (`apps/ai`) and email delivery (`apps/email`) are now both implemented -- see "AI pipeline" and "Email delivery pipeline" above.
+Per-tenant/scoped auth (today's API keys are flat/global, and `apps/admin` itself has no login/roles yet -- see `docs/SECURITY.md` "Known operational limits"), automatic mass sending (`apps/email` requires per-campaign human approval for every send, by design -- see PROJECT.md's non-goals), reply automation (replies are marked manually via `POST /campaigns/:id/recipients/:recipientId/mark-replied`, never detected/acted on automatically), a "sweep completed campaigns" job (`campaign.status` doesn't automatically reach `"completed"` -- see `DEPLOYMENT.md` "Known operational limits"), per-provider webhook HMAC signature verification (`docs/SECURITY.md` "Webhook authentication"), SES/SNS bounce event parsing (`docs/API.md`), cross-service enforcement of `apps/ai`'s draft approve/reject status (`apps/email` doesn't currently refuse to send a `"rejected"` draft -- review-tracking only in this slice). `apps/backend`'s ingest pipeline and `apps/ai`'s pipeline stages both still run synchronously within the request, not via a queue -- `apps/email` is the only service with a queue (BullMQ) so far. Do not assume any of the above exists when reasoning about the system. AI personalization (`apps/ai`), email delivery (`apps/email`), and the admin dashboard (`apps/admin`) are now all implemented -- see "AI pipeline", "Email delivery pipeline", and "Admin dashboard" above.

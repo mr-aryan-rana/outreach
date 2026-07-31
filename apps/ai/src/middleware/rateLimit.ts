@@ -25,10 +25,18 @@ class RedisFixedWindowStore implements Store {
     const redisKey = this.key(key);
     try {
       const totalHits = await this.redis.incr(redisKey);
-      if (totalHits === 1) {
+      let ttl = await this.redis.pttl(redisKey);
+      // Self-heal: a key with no TTL (-1) never resets and would permanently
+      // rate-limit this caller until someone manually clears Redis -- found
+      // live in apps/email during Sprint 5 testing (same store implementation
+      // duplicated across all three services), root cause not fully isolated
+      // but reproduced under heavy repeated traffic against a
+      // frequently-restarted dev server. Re-arm the TTL any time it's
+      // missing, not only on the request that happens to create the key.
+      if (totalHits === 1 || ttl < 0) {
         await this.redis.pexpire(redisKey, this.windowMs);
+        ttl = this.windowMs;
       }
-      const ttl = await this.redis.pttl(redisKey);
       const resetTime = new Date(Date.now() + (ttl > 0 ? ttl : this.windowMs));
       return { totalHits, resetTime };
     } catch (err) {

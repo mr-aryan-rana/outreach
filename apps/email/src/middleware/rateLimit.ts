@@ -10,7 +10,7 @@ const rateLimitedHandler = (req: any, res: any) =>
 
 const byApiKey = (req: any): string => req.apiKeyId ?? req.ip;
 
-class RedisFixedWindowStore implements Store {
+export class RedisFixedWindowStore implements Store {
   windowMs = env.rateLimitWindowMs;
 
   constructor(private readonly redis: Redis, private readonly keyPrefix: string) {}
@@ -23,10 +23,19 @@ class RedisFixedWindowStore implements Store {
     const redisKey = this.key(key);
     try {
       const totalHits = await this.redis.incr(redisKey);
-      if (totalHits === 1) {
+      let ttl = await this.redis.pttl(redisKey);
+      // Self-heal: a key with no TTL (-1) never resets and would permanently
+      // rate-limit this caller until someone manually clears Redis -- found
+      // live during Sprint 5 testing (heavy repeated traffic against a
+      // frequently-restarted dev server left keys with totalHits > 1 and no
+      // expiry, presumably from a restart racing the original "totalHits===1"
+      // pexpire). Not just first-hit-only: re-arm the TTL any time it's
+      // missing, not only when we happen to be the request that created the
+      // key.
+      if (totalHits === 1 || ttl < 0) {
         await this.redis.pexpire(redisKey, this.windowMs);
+        ttl = this.windowMs;
       }
-      const ttl = await this.redis.pttl(redisKey);
       const resetTime = new Date(Date.now() + (ttl > 0 ? ttl : this.windowMs));
       return { totalHits, resetTime };
     } catch (err) {

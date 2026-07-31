@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/asyncHandler";
+import { sendError } from "../middleware/errors";
 import { prisma } from "../db";
-import { getEmailSendDlq, getEmailSendQueue } from "../queue/emailQueue";
+import { enqueueSend, getEmailSendDlq, getEmailSendQueue } from "../queue/emailQueue";
+import { dlqJobIdParamSchema } from "../validation";
 
 export const dashboardRouter = Router();
 
@@ -49,6 +51,76 @@ dashboardRouter.get(
       else byProvider[row.provider].error = row._count._all;
     }
     res.json({ last24h: byProvider });
+  })
+);
+
+/**
+ * Added for apps/admin (Sprint 5)'s Queue page: dashboard/queue only gives
+ * counts, not which jobs are actually dead-lettered -- needed so the "Retry"
+ * action has an actual job id to act on, and so an operator can see why a
+ * job died before deciding to retry it.
+ */
+dashboardRouter.get(
+  "/dashboard/queue/dlq",
+  asyncHandler(async (_req, res) => {
+    const dlq = getEmailSendDlq();
+    const jobs = await dlq.getJobs(["waiting", "delayed"], 0, 100);
+    const recipientIds = jobs.map((j) => (j.data as { campaignRecipientId: string }).campaignRecipientId);
+    const recipients = await prisma.campaignRecipient.findMany({
+      where: { id: { in: recipientIds } },
+      include: { campaign: { select: { id: true, name: true } } },
+    });
+    const recipientById = new Map(recipients.map((r) => [r.id, r]));
+
+    res.json({
+      items: jobs.map((j) => {
+        const recipientId = (j.data as { campaignRecipientId: string }).campaignRecipientId;
+        const recipient = recipientById.get(recipientId);
+        return {
+          jobId: j.id,
+          campaignRecipientId: recipientId,
+          email: recipient?.email ?? null,
+          campaignId: recipient?.campaign.id ?? null,
+          campaignName: recipient?.campaign.name ?? null,
+          failedReason: j.failedReason ?? null,
+          timestamp: j.timestamp ? new Date(j.timestamp).toISOString() : null,
+        };
+      }),
+    });
+  })
+);
+
+/**
+ * Added for apps/admin (Sprint 5)'s Queue page "Retry" action. Dead-lettered
+ * jobs (see queue/worker.ts handleJobFailed(), moved here after exhausting
+ * every BullMQ retry attempt) have no automatic reprocessing -- a human
+ * decides whether the underlying cause (bad credentials, provider outage,
+ * transient network issue) has actually been fixed before replaying. Removes
+ * the job from the DLQ, resets the recipient to "queued", and re-enqueues it
+ * as a fresh send with a full new attempt budget.
+ */
+dashboardRouter.post(
+  "/dashboard/queue/dlq/:jobId/retry",
+  asyncHandler(async (req, res) => {
+    const parsed = dlqJobIdParamSchema.safeParse(req.params);
+    if (!parsed.success) return sendError(req, res, 400, "invalid_query", "invalid job id");
+
+    const dlq = getEmailSendDlq();
+    const job = await dlq.getJob(parsed.data.jobId);
+    if (!job) return sendError(req, res, 404, "not_found", `no dead-lettered job with id ${parsed.data.jobId}`);
+
+    const { campaignRecipientId } = job.data as { campaignRecipientId: string };
+    const recipient = await prisma.campaignRecipient.findUnique({ where: { id: campaignRecipientId } });
+    if (!recipient) return sendError(req, res, 404, "not_found", "recipient for this job no longer exists");
+
+    await job.remove();
+    const newJob = await enqueueSend(campaignRecipientId);
+    await prisma.campaignRecipient.update({
+      where: { id: campaignRecipientId },
+      data: { status: "queued", queueJobId: newJob.id },
+    });
+
+    res.json({ campaignRecipientId, requeued: true, jobId: newJob.id });
   })
 );
 

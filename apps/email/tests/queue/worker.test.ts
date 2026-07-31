@@ -77,6 +77,18 @@ describe("processSendJob", () => {
     );
   });
 
+  it("skips (without marking failed) a recipient whose campaign is paused, so resume can re-enqueue it", async () => {
+    (prisma.campaignRecipient.findUniqueOrThrow as jest.Mock).mockResolvedValue({
+      ...RECIPIENT,
+      campaign: { ...RECIPIENT.campaign, status: "paused" },
+    });
+
+    await processSendJob({ data: { campaignRecipientId: "r1" }, id: "job1" } as any);
+
+    expect(sendViaProvider).not.toHaveBeenCalled();
+    expect(prisma.campaignRecipient.update).not.toHaveBeenCalled();
+  });
+
   it("refuses to send if the campaign is somehow no longer in a sendable state", async () => {
     (prisma.campaignRecipient.findUniqueOrThrow as jest.Mock).mockResolvedValue({
       ...RECIPIENT,

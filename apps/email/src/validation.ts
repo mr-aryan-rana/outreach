@@ -20,6 +20,10 @@ export const campaignIdParamSchema = z.object({
   id: z.string().uuid(),
 });
 
+export const creatorIdParamSchema = z.object({
+  creatorId: z.string().uuid(),
+});
+
 export const emailEventsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).default(50).transform((v) => Math.min(v, 200)),
@@ -31,6 +35,12 @@ export const suppressionEntrySchema = z.object({
   email: z.string().email(),
   reason: z.enum(["bounced", "complained", "manual", "unsubscribed"]),
   source: z.string().max(500).optional(),
+});
+
+// BullMQ job ids are numeric-string sequence ids or caller-supplied strings
+// -- not UUIDs -- so this only checks non-empty, not a specific format.
+export const dlqJobIdParamSchema = z.object({
+  jobId: z.string().min(1).max(200),
 });
 
 export const createSenderProfileSchema = z.object({

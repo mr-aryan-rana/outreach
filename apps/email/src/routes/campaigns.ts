@@ -2,7 +2,14 @@ import { Router } from "express";
 import { asyncHandler } from "../middleware/asyncHandler";
 import { sendError } from "../middleware/errors";
 import { prisma } from "../db";
-import { approveCampaign, createCampaign, InvalidStateTransitionError, sendCampaign } from "../services/campaignService";
+import {
+  approveCampaign,
+  createCampaign,
+  InvalidStateTransitionError,
+  pauseCampaign,
+  resumeCampaign,
+  sendCampaign,
+} from "../services/campaignService";
 import { approveCampaignSchema, campaignIdParamSchema, createCampaignSchema } from "../validation";
 
 export const campaignsRouter = Router();
@@ -51,6 +58,44 @@ campaignsRouter.post(
     if (!idParsed.success) return sendError(req, res, 400, "invalid_query", "invalid campaign id");
     try {
       const result = await sendCampaign(idParsed.data.id);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof InvalidStateTransitionError) {
+        return sendError(req, res, 409, "invalid_state_transition", err.message);
+      }
+      throw err;
+    }
+  })
+);
+
+// Added for apps/admin (Sprint 5)'s Campaigns page: pause a queued/sending
+// campaign (dequeues not-yet-processed BullMQ jobs, in-flight sends finish
+// naturally) and resume it later (re-enqueues everything still "queued").
+// See services/campaignService.ts pauseCampaign()/resumeCampaign().
+campaignsRouter.post(
+  "/campaigns/:id/pause",
+  asyncHandler(async (req, res) => {
+    const idParsed = campaignIdParamSchema.safeParse(req.params);
+    if (!idParsed.success) return sendError(req, res, 400, "invalid_query", "invalid campaign id");
+    try {
+      const result = await pauseCampaign(idParsed.data.id);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof InvalidStateTransitionError) {
+        return sendError(req, res, 409, "invalid_state_transition", err.message);
+      }
+      throw err;
+    }
+  })
+);
+
+campaignsRouter.post(
+  "/campaigns/:id/resume",
+  asyncHandler(async (req, res) => {
+    const idParsed = campaignIdParamSchema.safeParse(req.params);
+    if (!idParsed.success) return sendError(req, res, 400, "invalid_query", "invalid campaign id");
+    try {
+      const result = await resumeCampaign(idParsed.data.id);
       res.json(result);
     } catch (err) {
       if (err instanceof InvalidStateTransitionError) {

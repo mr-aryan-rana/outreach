@@ -53,7 +53,7 @@ Set via `?schema=ai` on `AI_DATABASE_URL`/`AI_DIRECT_URL` (`apps/ai/prisma/schem
 | `ai_jobs` | one row per pipeline invocation (`/summary`, `/brand-fit`, `/draft`); `status`, `input`, `result`/`error`, timestamps |
 | `ai_generations` | one row per individual LLM call within a job -- `model`, `provider`, `promptVersionId`, `latencyMs`, `promptTokens`/`completionTokens`/`totalTokens`, `estimatedCostUsd`, `usedFallback`, `createdAt` |
 | `creator_summaries` | latest summary per creator (`creatorId` unique -- upserted, not accumulated; `ai_generations` is the historical record if that's ever needed) |
-| `draft_emails` | saved drafts, `status` always `"draft"` -- no code path in this service changes it, and there is no SMTP/email client anywhere in `apps/ai` for it to call even if it tried |
+| `draft_emails` | saved drafts. `status` is `"draft"` \| `"approved"` \| `"rejected"` (human review workflow, `apps/admin`/Sprint 5 -- `reviewedBy`/`reviewedAt`/`updatedAt` columns added non-destructively) -- still advisory only, no SMTP/email client anywhere in `apps/ai`, and `apps/email` doesn't currently gate sending on this status |
 
 ## Email schema isolation (apps/email, Sprint 4)
 
@@ -64,8 +64,8 @@ Same pattern again: `apps/email` owns 6 tables in a third Postgres schema (`emai
 | table | purpose |
 |---|---|
 | `sender_profiles` | a configured "From" identity + which provider adapter sends on its behalf (`mock`\|`smtp`\|`resend`\|`ses`\|`sendgrid`) + SPF/DKIM/DMARC verification flags |
-| `campaigns` | one row per campaign; `status` is the state machine (`pending_review` -> `approved` -> `queued` -> `sending` -> `completed`) -- see `docs/ARCHITECTURE.md` "Email delivery pipeline" for the guarded transitions |
-| `campaign_recipients` | one row per (campaign, recipient email) -- `@@unique([campaignId, email])` enforces "one active send per recipient per campaign" at the database level, not just in application code |
+| `campaigns` | one row per campaign; `status` is the state machine (`pending_review` -> `approved` -> `queued` -> `sending` -> `completed`, with a `paused` state reachable from `queued`/`sending` and back -- `apps/admin`/Sprint 5) -- see `docs/ARCHITECTURE.md` "Email delivery pipeline" for the guarded transitions |
+| `campaign_recipients` | one row per (campaign, recipient email) -- `@@unique([campaignId, email])` enforces "one active send per recipient per campaign" at the database level, not just in application code. Indexed on `creatorId` (Sprint 5, additive) to support `GET /creators/:creatorId/campaign-history`. |
 | `email_events` | the business-level status timeline per recipient (queued/sent/delivered/deferred/bounced/opened/clicked/replied/failed) |
 | `email_provider_logs` | the raw provider request/response audit log per send attempt -- distinct from `email_events`; never stores provider API keys/secrets |
 | `suppression_list` | global, cross-campaign; checked before every enqueue and again immediately before every send. Not one of the 5 tables literally named in the Sprint 4 spec, but required by its own "Respect suppression lists" rule -- same "add what the rules structurally require" precedent as `apps/backend`'s `bio`/`socialLinks` columns (Sprint 3). |

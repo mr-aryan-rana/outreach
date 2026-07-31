@@ -278,11 +278,16 @@ Full detail for a job, including every generation it produced (model, provider, 
   "startedAt": "...",
   "completedAt": "...",
   "generations": [
-    { "id": "...", "stage": "brand_analysis", "provider": "openai", "model": "gpt-4o-mini", "latencyMs": 842, "promptTokens": 210, "completionTokens": 96, "totalTokens": 306, "estimatedCostUsd": 0.00009, "usedFallback": false, "createdAt": "..." }
+    {
+      "id": "...", "stage": "brand_analysis", "provider": "openai", "model": "gpt-4o-mini",
+      "latencyMs": 842, "promptTokens": 210, "completionTokens": 96, "totalTokens": 306,
+      "estimatedCostUsd": 0.00009, "usedFallback": false, "output": "...", "createdAt": "...",
+      "promptVersion": { "id": "...", "version": 1, "content": "...", "template": { "name": "brand-analysis" } }
+    }
   ]
 }
 ```
-`status` is `"pending"`, `"processing"`, `"completed"`, or `"failed"`. Note: jobs are processed synchronously within the originating request today (no queue infra exists yet, matching `apps/backend`'s own "no BullMQ yet" state) -- `GET /jobs/:id` is for re-fetching a past result, not polling an in-flight one.
+`status` is `"pending"`, `"processing"`, `"completed"`, or `"failed"`. Note: jobs are processed synchronously within the originating request today (no queue infra exists yet, matching `apps/backend`'s own "no BullMQ yet" state) -- `GET /jobs/:id` is for re-fetching a past result, not polling an in-flight one. `output` and `promptVersion` were added (Sprint 5) for `apps/admin`'s Draft Review "compare prompt versions" view, which shows exactly which template/version produced each stage's output; `promptVersion` is `null` if the generation predates prompt-version DB syncing.
 
 ## Provider adapters
 
@@ -311,11 +316,48 @@ Fetch a single draft by id directly (without its parent job). Added for `apps/em
   "qualityScore": 0.9,
   "qualityNotes": "...",
   "status": "draft",
+  "reviewedBy": null,
+  "reviewedAt": null,
+  "updatedAt": "...",
   "createdAt": "..."
 }
 ```
 
 **Errors**: `400` invalid (non-UUID) id, `401` missing/invalid API key, `404` no draft with that id.
+
+### `GET /api/v1/ai/drafts`
+
+List/filter drafts. Added for `apps/admin` (Sprint 5)'s AI Draft Review page.
+
+**Query params**: `page` (default 1), `pageSize` (default 20, clamped to 100), `status` (`draft`/`approved`/`rejected`, optional), `creatorId` (uuid, optional).
+
+**Response `200`**: `{ page, pageSize, total, items: [{ id, creatorId, jobId, subject, brandFitScore, qualityScore, status, reviewedBy, reviewedAt, createdAt }] }` -- note this list response omits `body`/`qualityNotes` to keep pagination payloads small, matching the `GET /creators` vs `GET /creators/:id` precedent.
+
+### `PATCH /api/v1/ai/drafts/:id`
+
+Human review of a draft -- edit `subject`/`body` and/or set a review decision. Added for `apps/admin` (Sprint 5). This service still never sends anything; it only records the review decision. **`apps/email` does not currently gate sending on this status** -- it's review-tracking only in this slice, not yet a cross-service enforcement boundary (see `docs/ARCHITECTURE.md` "Explicitly not built yet").
+
+**Body** (at least one field required): `{ "subject"?: string, "body"?: string, "status"?: "draft" | "approved" | "rejected" }`
+
+**Headers**: `X-Reviewed-By` (optional) -- if present and `status` is being set, recorded as `reviewedBy` alongside a `reviewedAt` timestamp. `apps/admin`'s server-side proxy forwards this from its own `ADMIN_ACTOR_NAME`/form input; there is no real per-user auth yet (see `docs/SECURITY.md` "Known operational limits").
+
+**Response `200`**: full draft detail (same shape as `GET /ai/drafts/:id`), reflecting the update.
+
+**Errors**: `400` invalid body (empty patch) or invalid id, `401`, `404`.
+
+### `GET /api/v1/ai/summary/:creatorId`
+
+Read-only fetch of a creator's stored `CreatorSummary` row (the output of stage 1 of the pipeline). Added for `apps/admin` (Sprint 5)'s Creator Detail "AI Summary" tab -- there was previously no read path outside of re-running `POST /ai/summary` (which regenerates/overwrites it).
+
+**Response `200`**: `{ id, creatorId, summary, keyThemes, createdAt, updatedAt }`
+
+**Errors**: `400` invalid creator id, `401`, `404` no summary generated yet for this creator.
+
+### `GET /api/v1/ai/prompts`
+
+Read-only list of known prompt templates and their versions (synced into the DB as they're used -- see `promptService.ts`; content is always file-authored, this only reflects which versions exist). Added for `apps/admin` (Sprint 5)'s Settings page and the Draft Review page's "compare prompt versions" view.
+
+**Response `200`**: `{ items: [{ id, name, versions: [{ id, version, content, variables, isActive, createdAt }] }] }`
 
 ## `GET /health`, `GET /ready`, `GET /metrics`
 
@@ -349,11 +391,14 @@ Same envelope as the other two services, plus `invalid_state_transition` (409) -
 
 ```
 draft (implicit) -> pending_review -> approved -> queued -> sending -> completed
+                                                      ^          |
+                                                      +-- paused-+
 ```
 
 - `pending_review`: set automatically by `POST /campaigns` -- every campaign starts here, never anywhere further along.
 - `approved`: only reachable via `POST /campaigns/:id/approve`, which records `approvedBy` and `approvedAt`.
 - `queued` / `sending`: set by `POST /campaigns/:id/send` and the worker as recipients are enqueued/picked up.
+- `paused`: reachable from `queued`/`sending` via `POST /campaigns/:id/pause` (Sprint 5); returns to `queued` via `POST /campaigns/:id/resume`.
 - `completed`: not currently set automatically in this slice (no "all recipients terminal" sweep job exists yet -- see Future Improvements in the RC report); `GET /campaigns/:id/status`'s per-status `recipientCounts` is the reliable way to tell when a campaign has finished.
 
 ### `POST /api/v1/campaigns`
@@ -393,6 +438,22 @@ Enqueues every `pending` recipient onto the BullMQ send queue, spacing each one'
 **Response `200`**: `{ "campaignId": "...", "enqueued": 42 }`
 
 **Errors**: `400` invalid id, `401`, `404`, `409` `invalid_state_transition` (campaign isn't `approved`).
+
+### `POST /api/v1/campaigns/:id/pause`
+
+Added (Sprint 5) for `apps/admin`'s Campaigns page. Pauses a `queued`/`sending` campaign: removes not-yet-processed BullMQ jobs for its still-`queued` recipients (best-effort -- a job already `active`, i.e. being sent right now, cannot be safely cancelled mid-send and is left to finish naturally). Those recipients stay `queued` in the DB so `resume` knows exactly who's left.
+
+**Response `200`**: `{ "campaign": {...}, "dequeued": 8, "stillInFlight": 1 }`
+
+**Errors**: `400` invalid id, `401`, `404`, `409` `invalid_state_transition` (campaign isn't `queued`/`sending`).
+
+### `POST /api/v1/campaigns/:id/resume`
+
+Re-enqueues every recipient still `queued` (never sent while paused) using the same spacing/priority logic as a fresh send, and moves the campaign back to `queued`.
+
+**Response `200`**: `{ "campaignId": "...", "enqueued": 8 }`
+
+**Errors**: `400` invalid id, `401`, `404`, `409` `invalid_state_transition` (campaign isn't `paused`).
 
 ### `GET /api/v1/campaigns/:id/status`
 
@@ -448,6 +509,9 @@ Read-only aggregate views, same auth as the rest of `/api/v1/*`.
 - `GET /api/v1/dashboard/queue` -- live BullMQ counts: `waiting`, `active`, `delayed`, `failed`, `completed`, `deadLetter`.
 - `GET /api/v1/dashboard/providers` -- last-24h send success/error counts grouped by provider.
 - `GET /api/v1/dashboard/rates?campaignId=<uuid>` (campaignId optional, defaults to all-campaigns aggregate) -- `bounceRate`/`replyRate`/`failureRate` computed only over recipients past `pending`/`queued`/`suppressed` (an in-flight campaign's rate is meaningless until sending has actually happened).
+- `GET /api/v1/dashboard/queue/dlq` (Sprint 5) -- lists actual dead-lettered jobs (not just the count from `/dashboard/queue`), joined with recipient email and campaign name: `{ items: [{ jobId, campaignRecipientId, email, campaignId, campaignName, failedReason, timestamp }] }`. Added for `apps/admin`'s Queue page "Retry" action, which needs an actual job id to act on.
+- `POST /api/v1/dashboard/queue/dlq/:jobId/retry` (Sprint 5) -- removes a dead-lettered job from the DLQ, resets its recipient to `queued`, and re-enqueues it as a fresh send with a full new attempt budget. No automatic DLQ reprocessing exists; a human decides whether the underlying cause has been fixed before replaying. `404` if the job id isn't in the DLQ or its recipient no longer exists.
+- `GET /api/v1/creators/:creatorId/campaign-history` (Sprint 5) -- every campaign a given creator has been (or is) a recipient of: `{ items: [{ campaignId, campaignName, campaignStatus, recipientStatus, email, sentAt, createdAt }] }`, newest first. Added for `apps/admin`'s Creator Detail "Campaign History" tab -- there was previously no query-by-creatorId path over `campaign_recipients`.
 
 ## Provider adapters
 
@@ -467,3 +531,36 @@ BullMQ (`EMAIL_SEND_QUEUE`), one job per recipient, `attempts`/exponential `back
 ## `GET /health`, `GET /ready`, `GET /metrics`
 
 Same shape/semantics as the other two services. `/ready` checks Postgres (`email` schema), Redis, and the BullMQ queue's connection. `/metrics` adds `email_events_total{eventType}`, `email_duplicate_skipped_total`, `email_suppressed_total`, `queue_jobs_total{status}` on top of the shared base metrics.
+
+---
+
+# Admin Dashboard (apps/admin) -- Sprint 5
+
+A Next.js 15 internal web app for the MakeAble team -- Dashboard, Creators/Creator Detail (CRM), AI Draft Review, Campaigns/Campaign Detail, Queue, Email Events, Suppression List, Sender Profiles, Analytics, and Settings. Not itself a backing API service (no database, no schema) -- it's a client of the three services documented above, reached exclusively through its own server-side proxy.
+
+## No client-side API keys
+
+The browser never holds `BACKEND_API_KEY`/`AI_SERVICE_API_KEY`/`EMAIL_SERVICE_API_KEY`. Every data request from a client component goes to this app's own same-origin Next.js Route Handlers:
+
+- `GET/POST/PATCH/DELETE /api/proxy/backend/*` -> `apps/backend`
+- `GET/POST/PATCH/DELETE /api/proxy/ai/*` -> `apps/ai`
+- `GET/POST/PATCH/DELETE /api/proxy/email/*` -> `apps/email`
+- `GET /api/proxy/ready?service=backend|ai|email` -> the target service's unversioned `/ready` (kept separate since `/health`/`/ready`/`/metrics` have no `/api/v1` prefix)
+
+Each handler (`src/lib/proxyHandler.ts`) runs server-side only (`server-only` import guards `src/lib/serverEnv.ts` against an accidental client-component import becoming a build error), attaches the correct service's API key, forwards method/path/query/body, and does **not** forward the incoming request's own headers (cookies, auth) downstream -- the only credential attached is this app's own server-side key. An optional `X-Reviewed-By` header is forwarded as-is (not a credential) for draft-review/campaign-approval accountability.
+
+## Auth (today)
+
+None yet at the admin-app level -- anyone who can reach this app's URL can use it, matching the "internal tool, deploy behind existing network/VPN access control" assumption. Per-user login/roles is listed as a known gap, not implemented (`docs/SECURITY.md` "Known operational limits"). `X-Reviewed-By`/`approvedBy` fields are free-text operator-supplied strings, not verified identities.
+
+## Composed views (no new aggregate endpoint added)
+
+A few pages need data that spans multiple existing calls rather than one new endpoint:
+
+- **Dashboard KPIs**: `backendApi.listCreators({pageSize:1})` + `aiApi.listDrafts({status:"draft"/"approved", pageSize:1})`, using each response's `total`.
+- **Create Campaign's recipient picker**: approved drafts (`GET /ai/drafts?status=approved`) joined client-side with each draft's creator's email (`GET /creators/:id` per unique `creatorId`) -- `POST /campaigns` needs `{creatorId, draftEmailId, email}` triples, but a draft alone doesn't carry the creator's email.
+- **Analytics funnel**: `GET /dashboard/campaigns` (list, capped at 50) + one `GET /campaigns/:id/status` per campaign, summed client-side -- `/dashboard/rates` alone only covers bounce/reply/failure rate, not the full sent/delivered/opened/clicked breakdown. Would need a real aggregate endpoint before this list grows past dozens of campaigns.
+
+## Testing
+
+Component tests (Jest + React Testing Library, `apps/admin/tests/`) and end-to-end tests (Playwright, `apps/admin/e2e/`) covering navigation, dark mode, the command palette, keyboard shortcuts, responsive layout, and the suppression-list form flow against the real running services with the `mock` email provider. See `docs/TESTING.md` and the Sprint 5 RC report in `RELEASE.md` for what E2E testing found (two real bugs in generated shadcn `Command`/`Dialog` composition, fixed) and current known gaps.
