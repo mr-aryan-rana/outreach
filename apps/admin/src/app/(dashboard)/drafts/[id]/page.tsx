@@ -29,6 +29,7 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { StatusBadge } from "@/components/status-badge";
 import { QueryError } from "@/components/query-error";
 import { useDraft, useJob, useUpdateDraft } from "@/hooks/use-drafts";
+import { useCan } from "@/hooks/use-can";
 import { draftEditSchema, type DraftEditValues } from "@/lib/schemas/draft";
 import { formatDateTime } from "@/lib/format";
 
@@ -70,11 +71,12 @@ export default function DraftDetailPage({ params }: { params: Promise<{ id: stri
   const router = useRouter();
   const { data: draft, isLoading, isError, error, refetch } = useDraft(id);
   const updateDraft = useUpdateDraft(id);
+  const canReview = useCan("draft.review");
   const [confirmAction, setConfirmAction] = React.useState<"approved" | "rejected" | null>(null);
 
   const form = useForm<DraftEditValues>({
     resolver: zodResolver(draftEditSchema),
-    values: draft ? { subject: draft.subject, body: draft.body, reviewedBy: draft.reviewedBy ?? "" } : undefined,
+    values: draft ? { subject: draft.subject, body: draft.body } : undefined,
   });
 
   if (isLoading) {
@@ -88,17 +90,13 @@ export default function DraftDetailPage({ params }: { params: Promise<{ id: stri
   if (isError || !draft) return <QueryError error={error} onRetry={() => refetch()} />;
 
   function onSave(values: DraftEditValues) {
-    updateDraft.mutate({ subject: values.subject, body: values.body, reviewedBy: values.reviewedBy || undefined });
+    updateDraft.mutate({ subject: values.subject, body: values.body });
   }
 
   function onDecision(status: "approved" | "rejected") {
     const values = form.getValues();
-    if (!values.reviewedBy) {
-      form.setError("reviewedBy", { message: "Your name is required to approve or reject a draft" });
-      return;
-    }
     updateDraft.mutate(
-      { subject: values.subject, body: values.body, status, reviewedBy: values.reviewedBy },
+      { subject: values.subject, body: values.body, status },
       { onSuccess: () => router.push("/drafts") }
     );
   }
@@ -149,28 +147,14 @@ export default function DraftDetailPage({ params }: { params: Promise<{ id: stri
                       </FormItem>
                     )}
                   />
-                  <FormField
-                    control={form.control}
-                    name="reviewedBy"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Reviewed by (required to approve/reject)</FormLabel>
-                        <FormControl>
-                          <Input placeholder="you@makeable.example" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
                   <div className="flex flex-wrap gap-2 pt-2">
-                    <Button type="submit" variant="outline" disabled={updateDraft.isPending}>
+                    <Button type="submit" variant="outline" disabled={updateDraft.isPending || !canReview}>
                       <Save className="size-4" /> Save edits
                     </Button>
                     <Button
                       type="button"
                       variant="default"
-                      disabled={updateDraft.isPending}
+                      disabled={updateDraft.isPending || !canReview}
                       onClick={() => setConfirmAction("approved")}
                     >
                       <Check className="size-4" /> Approve
@@ -178,12 +162,17 @@ export default function DraftDetailPage({ params }: { params: Promise<{ id: stri
                     <Button
                       type="button"
                       variant="destructive"
-                      disabled={updateDraft.isPending}
+                      disabled={updateDraft.isPending || !canReview}
                       onClick={() => setConfirmAction("rejected")}
                     >
                       <X className="size-4" /> Reject
                     </Button>
                   </div>
+                  {!canReview ? (
+                    <p className="text-xs text-muted-foreground">
+                      Your role doesn&apos;t include draft review permission.
+                    </p>
+                  ) : null}
                 </form>
               </Form>
             </CardContent>

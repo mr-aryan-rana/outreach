@@ -6,7 +6,7 @@ const target = { baseUrl: serverEnv.backendUrl, apiKey: serverEnv.backendApiKey 
 
 async function handler(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const { path } = await params;
-  return proxyRequest(req, target, path);
+  return proxyRequest(req, target, "backend", path);
 }
 
 export { handler as GET, handler as POST, handler as PATCH, handler as DELETE };

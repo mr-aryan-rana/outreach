@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="cards">
+  <div class="card"><div class="value">{{ stats.total_extracted }}</div><div class="label">Extracted</div></div>
+  <div class="card"><div class="value">{{ stats.total_valid }}</div><div class="label">Valid</div></div>
+  <div class="card"><div class="value">{{ stats.total_sent }}</div><div class="label">Sent (all time)</div></div>
+  <div class="card">
+    <div class="value">{{ stats.sent_today }} / {{ stats.daily_limit }}</div>
+    <div class="label">Sent today</div>
+    <div class="progress"><div class="progress-bar" style="width: {{ stats.sent_today_pct }}%"></div></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Creator search (TikTok / Instagram / YouTube via DuckDuckGo)</h2>
+  <p style="color:#9aa0aa; font-size:13px;">
+    Runs several site-scoped dork queries (category keyword + "United States"/"US" +
+    an email-domain hint like "@gmail.com") and pulls emails straight out of
+    DuckDuckGo's indexed snippet text -- no page fetch needed, since these platforms
+    are JS-rendered and the raw page never contains contact info anyway. Queries are
+    spaced a few seconds apart to stay under DuckDuckGo's rate limit; runs in the
+    background and can take up to a minute.
+  </p>
+  <form method="post" action="/dashboard/search">
+    <label>Platform</label>
+    <select name="platform">
+      <option value="tiktok">TikTok</option>
+      <option value="instagram">Instagram</option>
+      <option value="youtube">YouTube</option>
+    </select>
+    <label>Category</label>
+    <select name="category">
+      <option value="all">All categories (family-friendly)</option>
+      {% for c in categories %}
+      <option value="{{ c }}">{{ c.replace('_', ' ').title() }}</option>
+      {% endfor %}
+    </select>
+    <label>Max queries this run</label>
+    <input type="number" name="max_queries" value="6" min="1" max="12">
+    <button type="submit">Search & extract</button>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>Run until target reached</h2>
+  <p style="color:#9aa0aa; font-size:13px;">
+    Keeps searching -- crossing every category keyword with all 50 US states and
+    "United States"/"US", 3s apart -- until this many <b>validated</b> emails exist
+    in the database, or it hits a safety cap ({{ "%d"|format(800) }} queries) or gets
+    persistently rate-limited by DuckDuckGo. Storage only, nothing is ever sent.
+    Runs in the background and can take a while -- watch the count on the Emails
+    tab or refresh this page.
+  </p>
+  <form method="post" action="/dashboard/search-target">
+    <label>Platform</label>
+    <select name="platform">
+      <option value="tiktok">TikTok</option>
+      <option value="instagram">Instagram</option>
+      <option value="youtube">YouTube</option>
+    </select>
+    <label>Category</label>
+    <select name="category">
+      <option value="all">All categories (family-friendly)</option>
+      {% for c in categories %}
+      <option value="{{ c }}">{{ c.replace('_', ' ').title() }}</option>
+      {% endfor %}
+    </select>
+    <label>Target valid emails</label>
+    <input type="number" name="target_valid" value="300" min="1" max="5000">
+    <button type="submit">Run until target</button>
+  </form>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Extract from text</h2>
+    <form method="post" action="/dashboard/extract-text">
+      <label>Paste text containing email addresses</label>
+      <textarea name="text" required></textarea>
+      <button type="submit">Extract & Store</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Extract from URL (scrape)</h2>
+    <form method="post" action="/dashboard/extract-url">
+      <label>Page URL</label>
+      <input type="url" name="url" required placeholder="https://example.com/contact">
+      <label>Creator name (optional)</label>
+      <input type="text" name="creator_name">
+      <label>Platform (optional)</label>
+      <input type="text" name="platform" placeholder="web">
+      <button type="submit">Scrape & Extract</button>
+    </form>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Validate pending emails</h2>
+  <p style="color:#9aa0aa; font-size:13px;">Checks syntax + live MX/deliverability for every stored email that hasn't been validated yet.</p>
+  <form method="post" action="/dashboard/validate">
+    <button type="submit">Run validation</button>
+  </form>
+</div>
+{% endblock %}

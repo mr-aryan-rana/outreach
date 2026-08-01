@@ -33,7 +33,19 @@ export function buildApp(deps: AppDeps): Express {
     res.setHeader(REQUEST_ID_HEADER, (req as any).id);
     next();
   });
-  app.use(express.json({ limit: "1mb" }));
+  // Captures the exact raw bytes alongside the parsed body -- webhook
+  // signature verification (Resend/SendGrid, src/services/webhookSignature.ts)
+  // must HMAC/verify the literal bytes the provider signed, not a
+  // re-serialized JSON.stringify() of the parsed object (whitespace/key-order
+  // differences would break every signature check).
+  app.use(
+    express.json({
+      limit: "1mb",
+      verify: (req: Request, _res, buf) => {
+        (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+      },
+    })
+  );
 
   app.use((req: Request, res: Response, next: NextFunction) => {
     const start = process.hrtime.bigint();

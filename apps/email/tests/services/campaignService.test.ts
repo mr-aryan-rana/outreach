@@ -190,6 +190,25 @@ describe("pauseCampaign", () => {
       expect.objectContaining({ data: { status: "paused" } })
     );
   });
+
+  // Regression: found live during a Sprint 6 Redis-flush recovery drill --
+  // a job that vanished from Redis entirely (e.g. FLUSHALL) used to be
+  // mislabeled as "still in flight" (implying it was actively being sent),
+  // when nothing was actually processing it. Distinguished from "active" so
+  // ops can tell "will finish naturally" apart from "already gone, will be
+  // caught by the next resume regardless."
+  it("reports a job missing from the queue entirely as neither dequeued nor active", async () => {
+    (prisma.campaign.findUniqueOrThrow as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status: "queued" });
+    (prisma.campaignRecipient.findMany as jest.Mock).mockResolvedValue([{ id: "r1", queueJobId: "job1" }]);
+    (getEmailSendQueue as jest.Mock).mockReturnValue({ getJob: jest.fn().mockResolvedValue(undefined) });
+    (prisma.campaign.update as jest.Mock).mockResolvedValue({ id: CAMPAIGN_ID, status: "paused" });
+
+    const result = await pauseCampaign(CAMPAIGN_ID);
+
+    expect(result.dequeued).toBe(0);
+    expect(result.stillInFlight).toBe(0);
+    expect(result.missingFromQueue).toBe(1);
+  });
 });
 
 describe("resumeCampaign", () => {

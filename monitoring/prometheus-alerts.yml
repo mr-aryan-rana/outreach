@@ -1,7 +1,9 @@
-# Prometheus alerting rules for the MakeAble backend (apps/backend, /metrics).
-# Load via `rule_files:` in prometheus.yml. Assumes Prometheus is scraping
-# GET /metrics on the backend at a job named "makeable-backend" -- adjust
-# job="..." selectors if your scrape config uses a different job name.
+# Prometheus alerting rules for all four Node services (apps/backend,
+# apps/ai, apps/email -- each expose GET /metrics; apps/admin does not, see
+# monitoring/README.md "apps/admin"). Load via `rule_files:` in
+# prometheus.yml. Assumes scrape jobs named "makeable-backend"/"makeable-ai"/
+# "makeable-email" -- adjust job="..." selectors if your scrape config uses
+# different job names.
 groups:
   - name: makeable-backend.rules
     rules:
@@ -80,3 +82,97 @@ groups:
         annotations:
           summary: "Ingest pipeline is running but storing nothing"
           description: "Candidates are being requested but none are reaching storage for 15m+ -- likely everything is failing extraction/validation/duplicate-checks. Check ingest_stage_total by stage in Grafana."
+
+  - name: makeable-ai.rules
+    rules:
+      - alert: MakeAbleAiCircuitBreakerOpen
+        expr: circuit_breaker_state{job="makeable-ai"} == 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "apps/ai circuit breaker open for provider {{ $labels.provider }}"
+          description: "{{ $labels.provider }} has been failing fast for 2m+. Check GET /api/v1/ai/providers/health and that provider's own status page."
+
+      - alert: MakeAbleAiHighFallbackRate
+        expr: >
+          sum(rate(ai_fallback_used_total{job="makeable-ai"}[15m]))
+          /
+          clamp_min(sum(rate(ai_generation_duration_seconds_count{job="makeable-ai"}[15m])), 1)
+          > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "apps/ai is falling back to the secondary provider for >20% of generations"
+          description: "The primary provider ({{ $labels.primary }}) is failing often enough that fallback is absorbing significant load for 15m+ -- check its circuit breaker state and provider status page before it opens entirely."
+
+      - alert: MakeAbleAiHighErrorRate
+        expr: >
+          sum(rate(http_request_duration_seconds_count{job="makeable-ai", status=~"5.."}[5m]))
+          /
+          sum(rate(http_request_duration_seconds_count{job="makeable-ai"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "apps/ai 5xx error rate above 5%"
+          description: "{{ $value | humanizePercentage }} of requests over the last 5m returned 5xx. Check /ready and recent deploys."
+
+      - alert: MakeAbleAiCostSpike
+        expr: increase(ai_estimated_cost_usd_total{job="makeable-ai"}[1h]) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "apps/ai estimated spend over $10 in the last hour"
+          description: "Real (non-mock) provider spend of {{ $value | humanize }} USD in 1h -- check GET /api/v1/ai/usage for a per-provider/stage breakdown; investigate for a runaway loop or misconfigured pipeline before it compounds."
+
+  - name: makeable-email.rules
+    rules:
+      - alert: MakeAbleEmailCircuitBreakerOpen
+        expr: circuit_breaker_state{job="makeable-email"} == 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "apps/email circuit breaker open for {{ $labels.service }}"
+          description: "A downstream dependency (apps/ai or apps/backend, called for draft content/creator identity) has been failing fast for 2m+."
+
+      - alert: MakeAbleEmailHighErrorRate
+        expr: >
+          sum(rate(http_request_duration_seconds_count{job="makeable-email", status=~"5.."}[5m]))
+          /
+          sum(rate(http_request_duration_seconds_count{job="makeable-email"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "apps/email 5xx error rate above 5%"
+          description: "{{ $value | humanizePercentage }} of requests over the last 5m returned 5xx. Check /ready and recent deploys."
+
+      - alert: MakeAbleEmailDeadLetterGrowth
+        expr: increase(email_queue_jobs_total{job="makeable-email", status="dead_letter"}[15m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "apps/email: jobs moving to the dead-letter queue"
+          description: "{{ $value }} jobs dead-lettered in 15m -- check GET /api/v1/dashboard/queue/dlq for the failure reasons (commonly a misconfigured sender profile or a real provider outage) before manually retrying via POST .../retry."
+
+      - alert: MakeAbleEmailProviderFailureSpike
+        expr: increase(email_provider_failures_total{job="makeable-email"}[10m]) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "apps/email: send failures spiking for provider {{ $labels.provider }}"
+          description: "{{ $value }} provider-level send failures in 10m for {{ $labels.provider }} -- likely a real provider outage or bad credentials; check GET /api/v1/dashboard/providers."
+
+      # No real-time queue-depth gauge exists yet (queue_jobs_total is a
+      # counter, incremented on completion/failure, not a live "how many are
+      # waiting right now" gauge) -- see monitoring/README.md "Known gap:
+      # queue depth" for why GET /api/v1/dashboard/queue (polled, not
+      # scraped) is the only live view of current backlog today.

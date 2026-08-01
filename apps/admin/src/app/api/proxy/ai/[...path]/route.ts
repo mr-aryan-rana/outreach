@@ -6,7 +6,7 @@ const target = { baseUrl: serverEnv.aiServiceUrl, apiKey: serverEnv.aiServiceApi
 
 async function handler(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const { path } = await params;
-  return proxyRequest(req, target, path);
+  return proxyRequest(req, target, "ai", path);
 }
 
 export { handler as GET, handler as POST, handler as PATCH, handler as DELETE };

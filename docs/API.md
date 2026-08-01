@@ -443,7 +443,7 @@ Enqueues every `pending` recipient onto the BullMQ send queue, spacing each one'
 
 Added (Sprint 5) for `apps/admin`'s Campaigns page. Pauses a `queued`/`sending` campaign: removes not-yet-processed BullMQ jobs for its still-`queued` recipients (best-effort -- a job already `active`, i.e. being sent right now, cannot be safely cancelled mid-send and is left to finish naturally). Those recipients stay `queued` in the DB so `resume` knows exactly who's left.
 
-**Response `200`**: `{ "campaign": {...}, "dequeued": 8, "stillInFlight": 1 }`
+**Response `200`**: `{ "campaign": {...}, "dequeued": 8, "stillInFlight": 1, "missingFromQueue": 0 }` -- `stillInFlight` counts jobs genuinely `active` right now (left to finish naturally); `missingFromQueue` (Sprint 6) counts jobs whose `queueJobId` no longer resolves in BullMQ at all (e.g. after a Redis data loss event, `OPERATIONS.md` "Redis recovery") -- both leave the recipient `queued` in Postgres so `resume` picks them up regardless, this only affects which reason is reported.
 
 **Errors**: `400` invalid id, `401`, `404`, `409` `invalid_state_transition` (campaign isn't `queued`/`sending`).
 
@@ -499,7 +499,7 @@ Provider delivery-event callbacks (delivered/deferred/bounced/opened/clicked), n
 
 `ses` currently only logs receipt -- SES delivers events via SNS, which requires handling the `SubscriptionConfirmation` handshake out-of-band before real events arrive; not implemented in this slice (see `docs/DEPLOYMENT.md`).
 
-**Auth**: shared-secret token, not per-provider HMAC signature verification -- see `docs/SECURITY.md` "Webhook authentication" before relying on this against a real provider account.
+**Auth** (Sprint 6): real per-provider signature verification (Resend Svix HMAC, SendGrid ECDSA, SES/SNS message signature) when the relevant secret/key is configured, falling back to a shared-secret token and then fully open otherwise -- see `docs/SECURITY.md` "Webhook authentication" for the full fallback chain and which env vars to set before relying on this against a real provider account.
 
 ## Dashboard API
 
@@ -534,9 +534,9 @@ Same shape/semantics as the other two services. `/ready` checks Postgres (`email
 
 ---
 
-# Admin Dashboard (apps/admin) -- Sprint 5
+# Admin Dashboard (apps/admin) -- Sprint 5, auth/RBAC/audit added Sprint 6
 
-A Next.js 15 internal web app for the MakeAble team -- Dashboard, Creators/Creator Detail (CRM), AI Draft Review, Campaigns/Campaign Detail, Queue, Email Events, Suppression List, Sender Profiles, Analytics, and Settings. Not itself a backing API service (no database, no schema) -- it's a client of the three services documented above, reached exclusively through its own server-side proxy.
+A Next.js 15 internal web app for the MakeAble team -- Dashboard, Creators/Creator Detail (CRM), AI Draft Review, Campaigns/Campaign Detail, Queue, Email Events, Suppression List, Sender Profiles, Analytics, and Settings. Not a backing API service for the other three (no `/api/v1/*` of its own, still just a client of them, reached exclusively through its own server-side proxy) -- but as of Sprint 6 it does own a small Postgres schema (`admin`) for real login and the audit log; see "Auth, roles, and audit log" below.
 
 ## No client-side API keys
 
@@ -549,9 +549,15 @@ The browser never holds `BACKEND_API_KEY`/`AI_SERVICE_API_KEY`/`EMAIL_SERVICE_AP
 
 Each handler (`src/lib/proxyHandler.ts`) runs server-side only (`server-only` import guards `src/lib/serverEnv.ts` against an accidental client-component import becoming a build error), attaches the correct service's API key, forwards method/path/query/body, and does **not** forward the incoming request's own headers (cookies, auth) downstream -- the only credential attached is this app's own server-side key. An optional `X-Reviewed-By` header is forwarded as-is (not a credential) for draft-review/campaign-approval accountability.
 
-## Auth (today)
+## Auth, roles, and audit log (Sprint 6)
 
-None yet at the admin-app level -- anyone who can reach this app's URL can use it, matching the "internal tool, deploy behind existing network/VPN access control" assumption. Per-user login/roles is listed as a known gap, not implemented (`docs/SECURITY.md` "Known operational limits"). `X-Reviewed-By`/`approvedBy` fields are free-text operator-supplied strings, not verified identities.
+Real authentication -- Auth.js (`next-auth` v5) with a Credentials provider (email + bcrypt-hashed password), JWT sessions, no external SSO account needed. `apps/admin` now owns its own Postgres schema (`admin`, same physical database, same isolation pattern as `ai`/`email` -- the one deliberate exception to "no database of its own," made because auth and a durable audit trail can't be satisfied by env-vars or ephemeral logs alone) holding `admin_users` and `audit_log`.
+
+**Roles**: `admin` (everything), `reviewer` (`draft.review` only), `operator` (campaigns/suppression/sender-profiles/queue-retry/mark-replied/ingest), `readonly` (no mutations, full read access). Enforced twice: `middleware.ts` requires *any* valid session for every page and every `/api/proxy/*` call; each proxy route handler additionally checks the caller's role against the specific permission the request maps to (`src/lib/rbac.ts`, `src/lib/permissionForRequest.ts`) before forwarding it -- server-side, not a hidden button. An unmapped mutating route fails closed (admin-only), never open.
+
+**Identity is no longer client-supplied**: `approvedBy` (campaign approval body) and `X-Reviewed-By` (draft review header) are now always overwritten with the authenticated session's real email before the request reaches the upstream service -- closes the Sprint 5-flagged gap where these were free-text, unverified strings.
+
+**Audit log**: every mutating `/api/proxy/*` request (whether it succeeds, is refused by RBAC, or errors upstream) writes an `audit_log` row -- actor, role, action, method, path, upstream status code, timestamp. Best-effort: a logging failure never blocks the actual action (that would make observability a new single point of failure), but is logged loudly (`audit_log_write_failed`) so a broken trail is visible in ops. Seed the first user with `npm run seed:admin` (`ADMIN_SEED_EMAIL`/`ADMIN_SEED_PASSWORD`, `apps/admin/scripts/seedAdmin.ts`).
 
 ## Composed views (no new aggregate endpoint added)
 
@@ -563,4 +569,4 @@ A few pages need data that spans multiple existing calls rather than one new end
 
 ## Testing
 
-Component tests (Jest + React Testing Library, `apps/admin/tests/`) and end-to-end tests (Playwright, `apps/admin/e2e/`) covering navigation, dark mode, the command palette, keyboard shortcuts, responsive layout, and the suppression-list form flow against the real running services with the `mock` email provider. See `docs/TESTING.md` and the Sprint 5 RC report in `RELEASE.md` for what E2E testing found (two real bugs in generated shadcn `Command`/`Dialog` composition, fixed) and current known gaps.
+Component tests (Jest + React Testing Library, `apps/admin/tests/`) and end-to-end tests (Playwright, `apps/admin/e2e/`) covering navigation, dark mode, the command palette, keyboard shortcuts, responsive layout, the suppression-list form flow, and (Sprint 6) the full login/logout flow plus role-based UI gating -- all against the real running services with the `mock` email provider. A Playwright global setup (`e2e/global-setup.ts`) logs in once via the real UI form and reuses that session across specs; `auth.spec.ts` explicitly resets to an unauthenticated context to test the login/RBAC paths themselves. See `docs/TESTING.md` and the Sprint 5/6 RC reports in `RELEASE.md` for what E2E testing found and current known gaps.

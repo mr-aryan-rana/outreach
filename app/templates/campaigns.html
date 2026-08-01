@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid2">
+  <div class="panel">
+    <h2>New campaign</h2>
+    <form method="post" action="/dashboard/campaigns">
+      <label>Name</label>
+      <input type="text" name="name" required>
+      <label>Subject</label>
+      <input type="text" name="subject_template" required>
+      <label>Body (use {{ '{{email}}' }} to personalize)</label>
+      <textarea name="body_template" required></textarea>
+      <button type="submit">Create campaign</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Send</h2>
+    <p style="color:#9aa0aa; font-size:13px;">
+      Sends one-by-one, 5-15s apart, to all valid emails not yet contacted by this
+      campaign, capped at {{ daily_limit }}/day across all campaigns combined.
+      Runs in the background.
+    </p>
+    <form method="post" action="/dashboard/send">
+      <label>Campaign</label>
+      <select name="campaign_id" required>
+        {% for c in campaigns %}
+        <option value="{{ c.id }}">{{ c.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Start send</button>
+    </form>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Campaigns</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Subject</th><th>Sent</th><th>Failed</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for c in campaigns %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td>{{ c.subject_template }}</td>
+        <td>{{ c.sent_count }}</td>
+        <td>{{ c.failed_count }}</td>
+        <td>{{ c.created_at }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" style="color:#9aa0aa;">No campaigns yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

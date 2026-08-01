@@ -35,6 +35,28 @@ export function useCreatorSummary(creatorId: string | undefined) {
   });
 }
 
+export function useProviderHealth() {
+  return useQuery({
+    queryKey: ["ai-provider-health"],
+    queryFn: () => aiApi.providerHealth(),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useAiUsage() {
+  return useQuery({
+    queryKey: ["ai-usage"],
+    queryFn: () => aiApi.usage(),
+  });
+}
+
+export function usePromptsVerify() {
+  return useQuery({
+    queryKey: ["ai-prompts-verify"],
+    queryFn: () => aiApi.promptsVerify(),
+  });
+}
+
 export function usePrompts() {
   return useQuery({
     queryKey: ["prompts"],
@@ -45,8 +67,12 @@ export function usePrompts() {
 export function useUpdateDraft(id: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (vars: { subject?: string; body?: string; status?: "draft" | "approved" | "rejected"; reviewedBy?: string }) =>
-      aiApi.updateDraft(id, { subject: vars.subject, body: vars.body, status: vars.status }, vars.reviewedBy),
+    // reviewedBy is no longer client-supplied -- the proxy route overwrites
+    // X-Reviewed-By with the authenticated session's email regardless of
+    // what's sent (src/lib/proxyHandler.ts), so there's nothing meaningful
+    // to pass here anymore.
+    mutationFn: (vars: { subject?: string; body?: string; status?: "draft" | "approved" | "rejected" }) =>
+      aiApi.updateDraft(id, { subject: vars.subject, body: vars.body, status: vars.status }),
     onSuccess: (draft) => {
       queryClient.setQueryData(["draft", id], draft);
       queryClient.invalidateQueries({ queryKey: ["drafts"] });

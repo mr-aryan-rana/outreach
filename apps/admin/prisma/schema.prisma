@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Same physical Postgres database as apps/backend/apps/ai/apps/email, own
+// schema ("admin", set via ?schema=admin on ADMIN_DATABASE_URL/ADMIN_DIRECT_URL)
+// -- identical isolation pattern established in RC1/Sprint 3/Sprint 4, see
+// docs/DATABASE.md "Per-service schema isolation". Added in Sprint 6 for
+// real auth (Auth.js credentials) and a durable audit trail -- apps/admin
+// previously had no database of its own; this is the first and only
+// deliberate exception, made because "protect apps/admin" + "audit every
+// admin action" cannot be satisfied by env-var-only credentials or ephemeral
+// logs alone. See docs/ARCHITECTURE.md "Admin dashboard".
+datasource db {
+  provider  = "postgresql"
+  url       = env("ADMIN_DATABASE_URL")
+  directUrl = env("ADMIN_DIRECT_URL")
+}
+
+// Credentials-provider login. Passwords are bcrypt-hashed (never stored or
+// logged in plaintext); seeded via scripts/seedAdmin.ts from
+// ADMIN_SEED_EMAIL/ADMIN_SEED_PASSWORD env vars, not committed anywhere.
+model AdminUser {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String // "admin" | "reviewer" | "operator" | "readonly" -- see src/lib/rbac.ts
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditLogs AuditLog[]
+
+  @@map("admin_users")
+}
+
+// One row per mutating action taken through this app -- every POST/PATCH/
+// DELETE proxied to apps/backend/apps/ai/apps/email is recorded here with
+// the authenticated actor's real identity (never a free-text header anymore,
+// see src/lib/proxyHandler.ts), closing the gap flagged in the Sprint 5 RC
+// report ("X-Reviewed-By/approvedBy are free-text, not verified identities").
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       AdminUser? @relation(fields: [userId], references: [id])
+  userEmail  String // denormalized -- survives a user being deleted later
+  role       String
+  action     String // e.g. "campaign.approve", "draft.reject", "suppression.add"
+  method     String // HTTP method of the proxied request
+  path       String // proxied path, e.g. "campaigns/<id>/approve"
+  statusCode Int? // upstream response status -- null if the request itself failed
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_log")
+}

@@ -3,23 +3,11 @@
 import * as React from "react";
 import { use } from "react";
 import Link from "next/link";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
 import { ArrowLeft, Check, Pause, Play, Send } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,62 +19,41 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { StatusBadge } from "@/components/status-badge";
 import { QueryError } from "@/components/query-error";
 import { useCampaignStatus, useApproveCampaign, useSendCampaign, usePauseCampaign, useResumeCampaign } from "@/hooks/use-campaigns";
 import { useEmailEvents } from "@/hooks/use-email-events";
-import { approveCampaignSchema, type ApproveCampaignValues } from "@/lib/schemas/campaign";
+import { useCan, useCurrentUser } from "@/hooks/use-can";
 import { formatDateTime } from "@/lib/format";
 
 const IN_PROGRESS_STATUSES = new Set(["queued", "sending"]);
 
 function ApproveDialog({ campaignId }: { campaignId: string }) {
-  const [open, setOpen] = React.useState(false);
   const approve = useApproveCampaign();
-  const form = useForm<ApproveCampaignValues>({
-    resolver: zodResolver(approveCampaignSchema),
-    defaultValues: { approvedBy: "" },
-  });
+  const user = useCurrentUser();
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button><Check className="size-4" /> Approve</Button>} />
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Approve campaign</DialogTitle>
-          <DialogDescription>This is the required human approval gate -- nothing sends without it.</DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form
-            noValidate
-            onSubmit={form.handleSubmit((values) =>
-              approve.mutate({ id: campaignId, approvedBy: values.approvedBy }, { onSuccess: () => setOpen(false) })
-            )}
-            className="space-y-4"
+    <AlertDialog>
+      <AlertDialogTrigger render={<Button><Check className="size-4" /> Approve</Button>} />
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Approve this campaign?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This is the required human approval gate -- nothing sends without it. You&apos;ll be recorded as the
+            approver ({user?.email}).
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => approve.mutate({ id: campaignId, approvedBy: user?.email ?? "" })}
+            disabled={approve.isPending}
           >
-            <FormField
-              control={form.control}
-              name="approvedBy"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Approved by</FormLabel>
-                  <FormControl>
-                    <Input placeholder="you@makeable.example" {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <DialogFooter>
-              <Button type="submit" disabled={approve.isPending}>
-                Confirm approval
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
+            Confirm approval
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -94,6 +61,9 @@ function CampaignActions({ campaignId, status }: { campaignId: string; status: s
   const send = useSendCampaign();
   const pause = usePauseCampaign();
   const resume = useResumeCampaign();
+  const canManage = useCan("campaign.manage");
+
+  if (!canManage) return null;
 
   if (status === "pending_review") return <ApproveDialog campaignId={campaignId} />;
 

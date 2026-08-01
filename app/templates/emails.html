@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="panel">
+  <h2>Add email manually</h2>
+  <form method="post" action="/dashboard/emails/add" style="flex-direction: row; align-items: flex-end; gap: 8px;">
+    <input type="email" name="address" required placeholder="someone@example.com" style="flex:1;">
+    <button type="submit">Add to list</button>
+  </form>
+</div>
+
+<div class="panel">
+  <div class="tabs" style="margin-bottom:12px;">
+    <a href="/dashboard/emails?filter=all" class="{{ 'active' if filter == 'all' else '' }}">All ({{ counts.all }})</a>
+    <a href="/dashboard/emails?filter=valid" class="{{ 'active' if filter == 'valid' else '' }}">Valid ({{ counts.valid }})</a>
+    <a href="/dashboard/emails?filter=invalid" class="{{ 'active' if filter == 'invalid' else '' }}">Invalid ({{ counts.invalid }})</a>
+    <a href="/dashboard/emails?filter=unvalidated" class="{{ 'active' if filter == 'unvalidated' else '' }}">Unvalidated ({{ counts.unvalidated }})</a>
+    <a href="/dashboard/emails?filter=sent" class="{{ 'active' if filter == 'sent' else '' }}">Sent ({{ counts.sent }})</a>
+  </div>
+  {% if not campaigns %}
+  <p style="color:#e0c25f; font-size:13px;">Create a campaign first to enable per-email sending. <a href="/dashboard/campaigns" style="color:#6fb3f0;">Create one →</a></p>
+  {% endif %}
+  <table>
+    <thead>
+      <tr><th>Email</th><th>Source</th><th>Phone</th><th>Validity</th><th>Send status</th><th>Discovered</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.address }}</td>
+        <td>{{ row.source or '—' }}</td>
+        <td>{{ row.phone or '—' }}</td>
+        <td>
+          {% if row.validated %}
+            <span class="badge {{ 'valid' if row.is_valid else 'invalid' }}">{{ 'valid' if row.is_valid else 'invalid' }}</span>
+          {% else %}
+            <span class="badge pending">unvalidated</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.send_status %}
+            <span class="badge {{ row.send_status }}">{{ row.send_status }}</span>
+          {% else %}
+            <span class="badge pending">not sent</span>
+          {% endif %}
+        </td>
+        <td>{{ row.created_at }}</td>
+        <td>
+          {% if row.is_valid and campaigns %}
+          <form method="post" action="/dashboard/emails/send-one" style="flex-direction: row; gap: 6px;">
+            <input type="hidden" name="email_id" value="{{ row.id }}">
+            <input type="hidden" name="filter" value="{{ filter }}">
+            <select name="campaign_id" style="padding: 4px;">
+              {% for c in campaigns %}
+              <option value="{{ c.id }}" {{ 'selected' if c.id == row.last_campaign_id else '' }}>{{ c.name }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" style="padding: 4px 10px; font-size: 12px;">
+              {{ 'Retry' if row.send_status == 'failed' else 'Send' }}
+            </button>
+          </form>
+          {% elif not row.validated %}
+          <span style="color:#9aa0aa; font-size:12px;">validate first</span>
+          {% elif not row.is_valid %}
+          <span style="color:#9aa0aa; font-size:12px;">invalid address</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" style="color:#9aa0aa;">No emails match this filter yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

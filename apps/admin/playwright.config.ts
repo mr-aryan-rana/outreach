@@ -15,9 +15,14 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 1,
   timeout: 45_000,
   reporter: [["list"]],
+  globalSetup: "./e2e/global-setup.ts",
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3002",
     trace: "on-first-retry",
+    // Pre-authenticated as the seeded admin user (see global-setup.ts) --
+    // auth.spec.ts overrides this per-test to exercise the unauthenticated
+    // and non-admin-role paths specifically.
+    storageState: "./e2e/.auth/admin.json",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   // Assumes `npm run dev` (or the real backend/ai/email services + this app)

@@ -115,20 +115,31 @@ GET /health, /ready, /metrics                                   (apps/email, unv
 
 Provider adapters (`apps/email/src/providers/`) mirror `apps/ai`'s pattern exactly: a minimal interface (`send()`), a `registry.ts` resolving by name, one file per provider, and a `MockEmailProvider` default that makes zero network calls -- used for every automated test and all live verification performed in this repo. See `docs/API.md` "Email Delivery Service" for the full endpoint reference, and `docs/SECURITY.md` for the webhook-authentication gap and the sending-without-approval prevention this pipeline is built around.
 
-## Admin dashboard (apps/admin, Sprint 5)
+## Admin dashboard (apps/admin, Sprint 5; auth/RBAC/audit added Sprint 6)
 
-Next.js 15 / React 19 App Router web app, TanStack Query for server state, React Hook Form + Zod for form validation, shadcn/ui (Base UI-backed, not Radix) for components, Recharts for the Analytics funnel. Not a fourth backend service -- no database, no schema, no business logic of its own. Every page is a client of `apps/backend`/`apps/ai`/`apps/email` over HTTP, reached exclusively through this app's own server-side proxy:
+Next.js 15 / React 19 App Router web app, TanStack Query for server state, React Hook Form + Zod for form validation, shadcn/ui (Base UI-backed, not Radix) for components, Recharts for the Analytics funnel, Auth.js (Credentials provider) for login. Not a fourth *business-logic* backend -- no `/api/v1/*` of its own, no copy of any other service's data, every page is a client of `apps/backend`/`apps/ai`/`apps/email` over HTTP, reached exclusively through this app's own server-side proxy. It does own a small Postgres schema (`admin`, same physical database, same isolation pattern as `ai`/`email`) for two tables only: `admin_users` (login) and `audit_log` -- the one deliberate exception to "no database of its own," scoped narrowly to what auth and a durable audit trail actually require:
 
 ```
 Browser (client component)
   │  fetch("/api/proxy/<service>/<path>")           -- same-origin, no API key
   ▼
-Next.js Route Handler (src/app/api/proxy/<service>/[...path]/route.ts)
+middleware.ts                                        -- Edge runtime, no Prisma/bcrypt
+  │  requires a valid Auth.js session (JWT cookie) for every page and every /api/proxy/* call
+  │  unauthenticated -> redirect to /login
+  ▼
+Next.js Route Handler (src/app/api/proxy/<service>/[...path]/route.ts)   -- Node runtime
+  │  re-checks session (auth()) independently of middleware
+  │  mutating request? -> classify permission (src/lib/permissionForRequest.ts)
+  │    -> role lacks permission? 403 + audit_log row, stop here
+  │  overwrites approvedBy/X-Reviewed-By with the session's real email
   │  attaches X-API-Key from server-only env (src/lib/serverEnv.ts, "server-only" import)
   │  forwards method/path/query/body, does NOT forward incoming cookies/auth
+  │  writes an audit_log row (actor, role, action, method, path, status) for every mutation
   ▼
 apps/backend | apps/ai | apps/email   (real service, real data, mock or real providers)
 ```
+
+`auth.config.ts` (edge-safe: pages/callbacks only) vs `auth.ts` (full config, Credentials provider + Prisma + bcrypt, Node runtime only) are deliberately split -- `middleware.ts` runs in the Edge runtime, which cannot bundle Prisma or bcrypt; only the JWT-decode path needs to run there. Roles: `admin`, `reviewer` (draft review only), `operator` (campaigns/suppression/senders/queue/ingest), `readonly` (no mutations). See `docs/API.md` "Auth, roles, and audit log" for the full permission table and `docs/SECURITY.md` for what this does and doesn't protect against.
 
 This is the same "browser never holds a backend credential" principle as every other cross-service boundary in this repo, applied to a UI instead of another API. See `docs/API.md` "Admin Dashboard" for the full proxy route list, composed-view endpoints (KPIs, campaign-recipient-email joins, analytics funnel) that reuse existing endpoints rather than adding aggregate ones, and what Playwright E2E testing found and fixed this sprint (two real bugs in generated shadcn `Command`/`Dialog` composition that silently broke click handling and crashed the command palette -- see the Sprint 5 RC report in `RELEASE.md`).
 
@@ -169,7 +180,7 @@ When a breaker is open, the call fails immediately with `BrokenCircuitError` ins
 | `apps/backend` | All business logic, Postgres, Redis, API, orchestration | Never runs its own search/scrape logic — delegates to the Python services |
 | `apps/ai` | Creator summaries, brand-fit analysis, email draft generation via LLM providers | Never sends email, never touches `apps/backend`'s tables directly (reads creator data over HTTP), no campaign/automation logic |
 | `apps/email` | Campaign/recipient management, approval-gated queueing, provider-adapter sending, delivery event tracking, suppression | Never auto-sends a draft, never approves its own campaigns, never automates replies, never generates AI content (reads drafts from `apps/ai` over HTTP) |
-| `apps/admin` | Internal dashboard/CRM UI: creator browsing, draft review, campaign management, queue/analytics visibility | No business logic or persistence of its own -- every action is a proxied call to one of the three services above; never holds a backend API key client-side |
+| `apps/admin` | Internal dashboard/CRM UI: creator browsing, draft review, campaign management, queue/analytics visibility, login/RBAC/audit | No business logic of its own -- every data action is a proxied call to one of the three services above; never holds a backend API key client-side. Its own `admin` schema holds only login + audit data, never a copy of another service's data |
 
 This split matches PROJECT.md §7 exactly: Python services are stateless and read-only; the Node backend owns all persistence and business rules; `apps/ai` owns only its own AI-specific tables (`docs/DATABASE.md` "AI schema isolation") and reaches creator data through the backend's API, never its database; `apps/email` owns only its own delivery-specific tables and reaches draft content through `apps/ai`'s API, never its database; `apps/admin` owns no tables at all and reaches all three backend services only through its own server-side proxy (`docs/API.md` "Admin Dashboard").
 

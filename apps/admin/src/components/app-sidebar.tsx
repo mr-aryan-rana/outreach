@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS } from "@/components/nav-config";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { UserMenu } from "@/components/user-menu";
 
 export function AppSidebar() {
   const pathname = usePathname();
@@ -41,6 +42,7 @@ export function AppSidebar() {
         <span>Ctrl/⌘+K to search</span>
         <ThemeToggle />
       </div>
+      <UserMenu />
     </aside>
   );
 }

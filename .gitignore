@@ -25,6 +25,7 @@ apps/backend/prisma/migrations/dev.db
 # Harvested data (never commit scraped PII)
 emails.json
 creators.csv
+app/data/
 
 # OS / editor
 .DS_Store

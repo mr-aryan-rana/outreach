@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/empty-state";
 import { QueryError } from "@/components/query-error";
 import { useQueueCounts, useDeadLetterJobs, useRetryDeadLetter } from "@/hooks/use-queue";
+import { useCan } from "@/hooks/use-can";
 import { formatDateTime } from "@/lib/format";
 
 function QueueCountCard({ label, value, tone }: { label: string; value: number; tone?: "warn" | "danger" }) {
@@ -31,6 +32,7 @@ export default function QueuePage() {
   const { data: counts, isLoading: countsLoading, isError: countsError, error: countsErr, refetch: refetchCounts } = useQueueCounts();
   const { data: dlq, isLoading: dlqLoading, isError: dlqError, error: dlqErr, refetch: refetchDlq } = useDeadLetterJobs();
   const retry = useRetryDeadLetter();
+  const canRetry = useCan("queue.retry");
 
   return (
     <div>
@@ -91,7 +93,7 @@ export default function QueuePage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={retry.isPending}
+                        disabled={retry.isPending || !canRetry}
                         onClick={() => retry.mutate(job.jobId)}
                       >
                         <RotateCw className="size-4" /> Retry

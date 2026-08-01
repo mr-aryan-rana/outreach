@@ -70,6 +70,15 @@ Same pattern again: `apps/email` owns 6 tables in a third Postgres schema (`emai
 | `email_provider_logs` | the raw provider request/response audit log per send attempt -- distinct from `email_events`; never stores provider API keys/secrets |
 | `suppression_list` | global, cross-campaign; checked before every enqueue and again immediately before every send. Not one of the 5 tables literally named in the Sprint 4 spec, but required by its own "Respect suppression lists" rule -- same "add what the rules structurally require" precedent as `apps/backend`'s `bio`/`socialLinks` columns (Sprint 3). |
 
+## Admin schema isolation (apps/admin, Sprint 6)
+
+Fourth schema (`admin`, set via `?schema=admin` on `ADMIN_DATABASE_URL`/`ADMIN_DIRECT_URL`), same physical database, same isolation pattern -- but deliberately minimal: two tables only, existing solely to back real login and the audit trail (`docs/ARCHITECTURE.md` "Admin dashboard" explains why this is the one exception to "no database of its own"). Never a copy of `public`/`ai`/`email`'s data.
+
+| table | purpose |
+|---|---|
+| `admin_users` | Auth.js Credentials login -- `email` (unique), bcrypt `passwordHash`, `role`, `isActive`. Seeded via `npm run seed:admin`, never via a public signup endpoint (none exists). |
+| `audit_log` | one row per mutating `/api/proxy/*` request from any admin session -- `userEmail`/`role` (denormalized, survives the user being deleted later), `action`, `method`, `path`, `statusCode`, `metadata`, `createdAt`. Indexed on `userId`, `action`, `createdAt`. |
+
 ## Rules
 
 - No `SELECT *` — Prisma queries always select explicit fields.

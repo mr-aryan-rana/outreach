@@ -26,6 +26,24 @@ const CIRCUIT_STATE_VALUE: Record<number, number> = {
 };
 
 const policies = new Map<string, IPolicy>();
+const circuitStates = new Map<string, "closed" | "half_open" | "open">();
+
+const STATE_NAME: Record<number, "closed" | "half_open" | "open"> = {
+  [CircuitState.Closed]: "closed",
+  [CircuitState.HalfOpen]: "half_open",
+  [CircuitState.Open]: "open",
+  [CircuitState.Isolated]: "open",
+};
+
+/**
+ * Readable counterpart to the circuit_breaker_state Prometheus gauge --
+ * Prometheus is a write-only sink from this process's perspective, so
+ * GET /api/v1/ai/providers/health (Sprint 6) needs its own in-memory record
+ * to report current breaker state without scraping its own /metrics.
+ */
+export function getCircuitState(providerName: string): "closed" | "half_open" | "open" {
+  return circuitStates.get(providerName) ?? "closed";
+}
 
 /**
  * One retry+breaker+timeout policy per provider, created lazily and cached
@@ -46,8 +64,10 @@ export function getResiliencePolicy(providerName: string): IPolicy {
   const retryPolicy = retry(handleAll, { maxAttempts: 1, backoff: new ExponentialBackoff() });
 
   circuitBreakerState.labels(providerName).set(0);
+  circuitStates.set(providerName, "closed");
   breakerPolicy.onStateChange((state) => {
     circuitBreakerState.labels(providerName).set(CIRCUIT_STATE_VALUE[state] ?? 0);
+    circuitStates.set(providerName, STATE_NAME[state] ?? "closed");
   });
 
   const policy = wrap(retryPolicy, breakerPolicy, timeoutPolicy);

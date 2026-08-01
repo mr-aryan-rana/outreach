@@ -28,7 +28,7 @@ export const emailApi = {
     apiFetch<{ campaignId: string; enqueued: number }>("email", `campaigns/${id}/send`, { method: "POST" }),
 
   pauseCampaign: (id: string) =>
-    apiFetch<{ campaign: Campaign; dequeued: number; stillInFlight: number }>("email", `campaigns/${id}/pause`, {
+    apiFetch<{ campaign: Campaign; dequeued: number; stillInFlight: number; missingFromQueue: number }>("email", `campaigns/${id}/pause`, {
       method: "POST",
     }),
 

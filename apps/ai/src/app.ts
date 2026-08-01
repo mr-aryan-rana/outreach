@@ -9,6 +9,7 @@ import { apiKeyAuth } from "./middleware/apiKeyAuth";
 import { sendError } from "./middleware/errors";
 import { buildApiKeyRateLimiter, buildGeneralRateLimiter } from "./middleware/rateLimit";
 import { aiRouter } from "./routes/ai";
+import { aiOpsRouter } from "./routes/aiOps";
 import { buildHealthRouter } from "./routes/health";
 import { httpRequestDuration, registry } from "./services/metrics";
 
@@ -57,6 +58,7 @@ export function buildApp(deps: AppDeps): Express {
   v1.use(apiKeyAuth);
   v1.use(buildApiKeyRateLimiter(deps.redis));
   v1.use(aiRouter);
+  v1.use(aiOpsRouter);
   app.use("/api/v1", v1);
 
   app.use((req: Request, res: Response) => {

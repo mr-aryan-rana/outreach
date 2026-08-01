@@ -25,16 +25,20 @@ import { EmptyState } from "@/components/empty-state";
 import { QueryError } from "@/components/query-error";
 import { Badge } from "@/components/ui/badge";
 import { useSuppressionList, useAddSuppression } from "@/hooks/use-suppression";
+import { useCan } from "@/hooks/use-can";
 import { suppressionSchema, type SuppressionValues } from "@/lib/schemas/campaign";
 import { formatDateTime } from "@/lib/format";
 
 function AddSuppressionDialog() {
+  const canManage = useCan("suppression.manage");
   const [open, setOpen] = React.useState(false);
   const addSuppression = useAddSuppression();
   const form = useForm<SuppressionValues>({
     resolver: zodResolver(suppressionSchema),
     defaultValues: { email: "", reason: "manual", source: "" },
   });
+
+  if (!canManage) return null;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

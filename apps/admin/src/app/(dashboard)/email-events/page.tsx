@@ -16,6 +16,7 @@ import { QueryError } from "@/components/query-error";
 import { StatusBadge } from "@/components/status-badge";
 import { SimplePager } from "@/components/simple-pager";
 import { useEmailEvents } from "@/hooks/use-email-events";
+import { useCan } from "@/hooks/use-can";
 import { emailApi } from "@/lib/api/email";
 import { ApiError } from "@/lib/api/http";
 import { formatDateTime } from "@/lib/format";
@@ -25,6 +26,7 @@ const PAGE_SIZE = 25;
 
 function MarkRepliedButton({ campaignId, campaignRecipientId }: { campaignId: string; campaignRecipientId: string }) {
   const queryClient = useQueryClient();
+  const canManage = useCan("recipient.manage");
   const mutation = useMutation({
     mutationFn: () => emailApi.markReplied(campaignId, campaignRecipientId),
     onSuccess: () => {
@@ -33,6 +35,8 @@ function MarkRepliedButton({ campaignId, campaignRecipientId }: { campaignId: st
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.message : "Failed to mark as replied"),
   });
+
+  if (!canManage) return null;
 
   return (
     <Button size="sm" variant="ghost" disabled={mutation.isPending} onClick={() => mutation.mutate()}>

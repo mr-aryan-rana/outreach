@@ -179,19 +179,34 @@ export async function pauseCampaign(campaignId: string) {
     select: { id: true, queueJobId: true },
   });
 
+  // "missing" (queueJobId set, but BullMQ has no record of it) is a
+  // distinct case from "active" (genuinely being processed right now) --
+  // found via a live Sprint 6 Redis-flush recovery drill, where a vanished
+  // job was previously mislabeled as "still in flight" even though nothing
+  // was actually processing it. Both leave the recipient at "queued" in
+  // Postgres so resumeCampaign() re-enqueues it either way -- this is purely
+  // about reporting an accurate reason, not a functional difference.
   let removedCount = 0;
+  let activeCount = 0;
+  let missingCount = 0;
   for (const recipient of stillQueued) {
     if (!recipient.queueJobId) continue;
     const job = await queue.getJob(recipient.queueJobId);
-    if (!job) continue;
+    if (!job) {
+      missingCount += 1; // e.g. Redis was flushed/lost the job -- see OPERATIONS.md "Redis recovery"
+      continue;
+    }
     const state = await job.getState();
-    if (state === "active") continue; // already being sent -- let it finish
+    if (state === "active") {
+      activeCount += 1; // already being sent -- let it finish
+      continue;
+    }
     await job.remove();
     removedCount += 1;
   }
 
   const updated = await prisma.campaign.update({ where: { id: campaignId }, data: { status: "paused" } });
-  return { campaign: updated, dequeued: removedCount, stillInFlight: stillQueued.length - removedCount };
+  return { campaign: updated, dequeued: removedCount, stillInFlight: activeCount, missingFromQueue: missingCount };
 }
 
 /**

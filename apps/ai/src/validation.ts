@@ -36,6 +36,13 @@ export const draftListQuerySchema = z.object({
   creatorId: z.string().uuid().optional(),
 });
 
+// Sprint 6 (apps/admin Settings / ops): cost & token usage accounting query.
+export const usageQuerySchema = z.object({
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+  provider: z.enum(["openai", "anthropic", "gemini", "mock"]).optional(),
+});
+
 // Sprint 5 (apps/admin): human review of a generated draft -- edit
 // subject/body before send, or approve/reject it. At least one field must be
 // present; a bare "touch" request isn't meaningful.

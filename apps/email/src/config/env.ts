@@ -97,4 +97,13 @@ export const env = {
   resendApiKey: process.env.RESEND_API_KEY,
   sesRegion: process.env.AWS_REGION ?? process.env.SES_REGION,
   sendgridApiKey: process.env.SENDGRID_API_KEY,
+
+  // Webhook signature verification (Sprint 6) -- see src/services/webhookSignature.ts
+  // and docs/SECURITY.md "Webhook authentication". Each is independently
+  // optional: an unconfigured provider falls back to WEBHOOK_SHARED_SECRET
+  // (or fully open in dev if that's unset too), logged loudly either way so
+  // "which mode is this running in" is never ambiguous in production.
+  resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET,
+  sendgridWebhookPublicKey: process.env.SENDGRID_WEBHOOK_PUBLIC_KEY,
+  sesSnsVerifySignature: (process.env.SES_SNS_VERIFY_SIGNATURE ?? "true") !== "false",
 };

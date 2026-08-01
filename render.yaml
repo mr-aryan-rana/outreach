@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: outreach-automation
+    env: python
+    buildCommand: "pip install -r app/requirements.txt"
+    startCommand: "python -u run_automation.py"
+    autoDeploy: true

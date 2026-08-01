@@ -24,8 +24,10 @@ import { createCampaignSchema, type CreateCampaignValues } from "@/lib/schemas/c
 import { useApprovedDraftsWithEmail } from "@/hooks/use-approved-drafts-with-email";
 import { useSenderProfiles } from "@/hooks/use-sender-profiles";
 import { useCreateCampaign } from "@/hooks/use-campaigns";
+import { useCan } from "@/hooks/use-can";
 
 export function CreateCampaignDialog() {
+  const canManage = useCan("campaign.manage");
   const [open, setOpen] = React.useState(false);
   const { data: drafts, isLoading: draftsLoading } = useApprovedDraftsWithEmail();
   const { data: senderProfiles, isLoading: sendersLoading } = useSenderProfiles();
@@ -55,6 +57,8 @@ export function CreateCampaignDialog() {
 
   const eligibleDrafts = (drafts ?? []).filter((d) => d.email);
   const draftIds = form.watch("draftIds");
+
+  if (!canManage) return null;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

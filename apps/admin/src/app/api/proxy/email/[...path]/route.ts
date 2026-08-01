@@ -6,7 +6,7 @@ const target = { baseUrl: serverEnv.emailServiceUrl, apiKey: serverEnv.emailServ
 
 async function handler(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const { path } = await params;
-  return proxyRequest(req, target, path);
+  return proxyRequest(req, target, "email", path);
 }
 
 export { handler as GET, handler as POST, handler as PATCH, handler as DELETE };

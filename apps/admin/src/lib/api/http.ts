@@ -16,7 +16,6 @@ interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined>;
-  reviewedBy?: string;
 }
 
 function buildQuery(query?: RequestOptions["query"]): string {
@@ -48,10 +47,7 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const res = await fetch(`/api/proxy/${service}/${path}${buildQuery(options.query)}`, {
     method: options.method ?? "GET",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.reviewedBy ? { "X-Reviewed-By": options.reviewedBy } : {}),
-    },
+    headers: { "Content-Type": "application/json" },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     cache: "no-store",
   });

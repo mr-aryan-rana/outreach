@@ -24,17 +24,21 @@ import { TableSkeleton } from "@/components/table-skeleton";
 import { EmptyState } from "@/components/empty-state";
 import { QueryError } from "@/components/query-error";
 import { useSenderProfiles, useCreateSenderProfile } from "@/hooks/use-sender-profiles";
+import { useCan } from "@/hooks/use-can";
 import { senderProfileSchema, type SenderProfileValues } from "@/lib/schemas/campaign";
 
 const PROVIDERS = ["mock", "smtp", "resend", "ses", "sendgrid"] as const;
 
 function CreateSenderProfileDialog() {
+  const canManage = useCan("sender_profile.manage");
   const [open, setOpen] = React.useState(false);
   const create = useCreateSenderProfile();
   const form = useForm<SenderProfileValues>({
     resolver: zodResolver(senderProfileSchema),
     defaultValues: { name: "", fromEmail: "", fromName: "", replyTo: "", provider: "mock" },
   });
+
+  if (!canManage) return null;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

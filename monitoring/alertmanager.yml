@@ -1,0 +1,56 @@
+# Alertmanager routing config (Sprint 6) -- receives alerts fired by
+# Prometheus per prometheus-alerts.yml's rules and routes them. This is a
+# starting-point config, not wired to any real notification channel by
+# default (the `webhook_configs` URLs below are placeholders) -- fill in
+# your actual Slack webhook / PagerDuty integration key / email SMTP
+# settings before relying on this for real alerting.
+#
+# Load with: alertmanager --config.file=monitoring/alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: ["alertname", "job"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # critical alerts (5xx spikes, circuit breakers open, readiness failing)
+    # page immediately and repeat more often than the default warning cadence
+    - matchers:
+        - severity="critical"
+      receiver: critical
+      repeat_interval: 1h
+    - matchers:
+        - severity="warning"
+      receiver: warning
+
+receivers:
+  - name: default
+    # Fill in a real webhook (Slack incoming webhook, PagerDuty Events API
+    # proxy, etc.) before relying on this in production -- unconfigured,
+    # alerts fire in Prometheus/Alertmanager's own UI but notify no one.
+    webhook_configs: []
+
+  - name: critical
+    webhook_configs:
+      - url: "https://example.invalid/replace-with-your-real-pagerduty-or-slack-webhook"
+        send_resolved: true
+
+  - name: warning
+    webhook_configs:
+      - url: "https://example.invalid/replace-with-your-real-slack-webhook"
+        send_resolved: true
+
+inhibit_rules:
+  # Don't page separately for "high error rate" on a service whose circuit
+  # breaker is already known to be open for the same job -- the breaker
+  # alert is the more actionable signal, the error-rate alert is a
+  # downstream symptom of the same root cause.
+  - source_matchers:
+      - alertname=~"MakeAble.*CircuitBreakerOpen"
+    target_matchers:
+      - alertname=~"MakeAble.*HighErrorRate"
+    equal: ["job"]
