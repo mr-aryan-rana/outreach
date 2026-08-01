@@ -42,6 +42,8 @@ from duckduckgo_search import DDGS
 
 import time
 
+import os
+
 def search_ddg(query: str, max_results: int = 20) -> list[dict]:
     """Query Yahoo Search which
     handles rate limits much better than DDG directly.
@@ -49,12 +51,28 @@ def search_ddg(query: str, max_results: int = 20) -> list[dict]:
     which often has emails directly."""
     results = []
     
-    url = "https://search.yahoo.com/search"
+    target_url = "https://search.yahoo.com/search"
+    scraper_api_key = os.environ.get("SCRAPER_API_KEY")
+    
+    if scraper_api_key:
+        # Route through ScraperAPI
+        url = "http://api.scraperapi.com/"
+        params = {
+            "api_key": scraper_api_key,
+            "url": f"{target_url}?p={query}"
+        }
+        timeout = 45 # ScraperAPI can take longer
+    else:
+        # Direct request (will likely get blocked by Yahoo Cookie Consent on cloud IPs)
+        url = target_url
+        params = {"p": query}
+        timeout = 10
+
     try:
         resp = httpx.get(
             url, 
-            params={"p": query}, 
-            timeout=10, 
+            params=params, 
+            timeout=timeout, 
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         )
         
