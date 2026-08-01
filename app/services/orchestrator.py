@@ -13,8 +13,8 @@ from app.logger import logger
 MAX_SEARCH_ROUNDS_PER_BATCH = 5
 
 
-def _unsent_valid_count(db, require_approved: bool = False) -> int:
-    already_logged = select(EmailLog.email_id).where(EmailLog.status == "sent")
+def _unsent_valid_count(db, campaign_id: int, require_approved: bool = False) -> int:
+    already_logged = select(EmailLog.email_id).where(EmailLog.campaign_id == campaign_id)
     q = select(func.count(Email.id)).where(Email.is_valid.is_(True)).where(Email.id.not_in(already_logged))
     if require_approved:
         q = q.where(Email.is_approved.is_(True))
@@ -50,18 +50,25 @@ class Orchestrator:
         finally:
             db.close()
 
-        self.platform = platform
         self.category = category
         self.campaign_id = campaign_id
-        self.batch_size = batch_size or settings.ORCHESTRATOR_BATCH_SIZE
         self.auto_mode = auto_mode
+        
+        # If in auto mode, forcefully search all platforms with a batch size of 30 (10 per platform)
+        if self.auto_mode:
+            self.platform = "all"
+            self.batch_size = 30
+        else:
+            self.platform = platform
+            self.batch_size = batch_size or settings.ORCHESTRATOR_BATCH_SIZE
+            
         self.cycles_completed = 0
         self._stop_event.clear()
         self.running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        logger.info(f"orchestrator started: platform={platform} category={category} "
-                    f"campaign_id={campaign_id} batch_size={self.batch_size}")
+        logger.info(f"orchestrator started: platform={self.platform} category={category} "
+                    f"campaign_id={campaign_id} batch_size={self.batch_size} auto_mode={self.auto_mode}")
         return True, "started"
 
     def stop(self) -> tuple[bool, str]:
@@ -73,7 +80,7 @@ class Orchestrator:
     def status(self) -> dict:
         db = SessionLocal()
         try:
-            unsent_valid = _unsent_valid_count(db)
+            unsent_valid = _unsent_valid_count(db, self.campaign_id) if self.campaign_id else 0
             total_valid = db.scalar(select(func.count(Email.id)).where(Email.is_valid.is_(True))) or 0
             total_sent = db.scalar(select(func.count(EmailLog.id)).where(EmailLog.status == "sent")) or 0
         finally:
@@ -122,11 +129,11 @@ class Orchestrator:
         platforms_to_search = ["tiktok", "youtube", "instagram"] if self.platform == "all" else [self.platform]
         
         while (not self._stop_event.is_set()
-               and _unsent_valid_count(db, require_approved=False) < self.batch_size
+               and _unsent_valid_count(db, self.campaign_id, require_approved=False) < self.batch_size
                and rounds < MAX_SEARCH_ROUNDS_PER_BATCH):
             
             total_found_this_round = 0
-            needed_total = self.batch_size - _unsent_valid_count(db, require_approved=False)
+            needed_total = self.batch_size - _unsent_valid_count(db, self.campaign_id, require_approved=False)
             
             for plat in platforms_to_search:
                 if self._stop_event.is_set():
@@ -137,7 +144,7 @@ class Orchestrator:
                 result = creator_search.search_until_target(db, plat, self.category, target_valid=needed_for_plat)
                 total_found_this_round += result["valid_found_this_run"]
                 
-                if _unsent_valid_count(db, require_approved=False) >= self.batch_size:
+                if _unsent_valid_count(db, self.campaign_id, require_approved=False) >= self.batch_size:
                     break
 
             rounds += 1
