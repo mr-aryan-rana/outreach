@@ -1,3 +1,6 @@
+import random
+import time
+
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -5,6 +8,7 @@ from app.extractor.core import extract_emails_from_text
 from app.validator.core import is_valid_email
 from app.scraper.core import fetch_page_content
 from app.models.models import Creator, Email, Validation
+from app.utils.config import settings
 from app.logger import logger
 
 
@@ -49,12 +53,15 @@ def validate_pending(db: Session, limit: int = 500) -> dict:
 
     valid_count = 0
     invalid_count = 0
-    for email in pending:
+    for i, email in enumerate(pending):
         ok, reason = is_valid_email(email.address)
         db.add(Validation(email_id=email.id, syntax_check=True, smtp_check=ok, reason=reason))
         email.is_valid = ok
         valid_count += int(ok)
         invalid_count += int(not ok)
+
+        if i < len(pending) - 1:
+            time.sleep(random.uniform(settings.VALIDATION_DELAY_MIN_SEC, settings.VALIDATION_DELAY_MAX_SEC))
 
     db.commit()
     logger.info(f"validated {len(pending)} emails: {valid_count} valid, {invalid_count} invalid")

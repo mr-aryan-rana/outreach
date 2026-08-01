@@ -1,18 +1,34 @@
 import json
 from pathlib import Path
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import select
 
 from app.models.models import Email
 
 EXPORT_PATH = Path(__file__).resolve().parent.parent / "data" / "mail_list.json"
 
+# No caller currently passes a huge dataset (repo goal is 200 emails/day),
+# but an unbounded `select(Email)` with no limit would load the entire
+# table into memory and JSON-serialize it in one shot -- this bounds that
+# regardless of how large the table grows. Raise via the `limit` param if a
+# genuinely larger one-off export is ever needed.
+DEFAULT_EXPORT_LIMIT = 10_000
 
-def export_mail_list(db: Session, path: Path = EXPORT_PATH) -> int:
+
+def export_mail_list(db: Session, path: Path = EXPORT_PATH, limit: int = DEFAULT_EXPORT_LIMIT) -> int:
     """Dump the current email list to a JSON file. Temporary storage --
     the database (via the dashboard) remains the source of truth."""
-    emails = db.scalars(select(Email).order_by(Email.created_at.desc())).all()
+    emails = db.scalars(
+        select(Email)
+        .options(
+            joinedload(Email.creator),
+            selectinload(Email.email_logs),
+            selectinload(Email.validations),
+        )
+        .order_by(Email.created_at.desc())
+        .limit(limit)
+    ).all()
 
     rows = []
     for email in emails:

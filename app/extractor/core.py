@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 # Modified to handle search engine highlighting which injects spaces
 EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+\s*@\s*[A-Za-z0-9.-]+\s*\.\s*[A-Za-z]{2,}\b")
@@ -10,15 +11,31 @@ PHONE_PATTERN = re.compile(
     r"(?<![\w@])(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]\d{3,4}[-.\s]\d{3,4}(?:[-.\s]\d{2,4})?(?![\w])"
 )
 
-DISPOSABLE_DOMAINS = {
-    "mailinator.com", "10minutemail.com", "guerrillamail.com",
-    "tempmail.com", "yopmail.com", "trashmail.com",
-}
+# Maintained blocklist (8000+ domains, MIT licensed) instead of a hand-picked
+# handful -- falls back to a small hardcoded set if the package is somehow
+# unavailable so extraction never hard-fails over a missing optional import.
+try:
+    from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
+except ImportError:
+    DISPOSABLE_DOMAINS = {
+        "mailinator.com", "10minutemail.com", "guerrillamail.com",
+        "tempmail.com", "yopmail.com", "trashmail.com",
+    }
 
-KNOWN_TLDS = {
-    "com", "net", "org", "edu", "gov", "io", "co", "info", "biz",
-    "me", "tv", "app", "dev", "us", "uk",
-}
+# Full IANA TLD registry (~1440 entries, data/tlds.txt), bundled locally
+# rather than fetched at runtime -- refresh by re-running the download in
+# extractor/data/README or just re-fetching data.iana.org/TLD/tlds-alpha-by-domain.txt.
+# A ~15-entry hardcoded list used to miss common creator-business TLDs
+# (.ai, .xyz, .online, most ccTLDs), silently mis-trimming or dropping
+# otherwise-valid emails during snippet cleanup below.
+_TLD_FILE = Path(__file__).resolve().parent / "data" / "tlds.txt"
+try:
+    KNOWN_TLDS = set(_TLD_FILE.read_text(encoding="utf-8").split())
+except FileNotFoundError:
+    KNOWN_TLDS = {
+        "com", "net", "org", "edu", "gov", "io", "co", "info", "biz",
+        "me", "tv", "app", "dev", "us", "uk",
+    }
 
 
 def clean_email(email_str: str) -> str | None:

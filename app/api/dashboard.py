@@ -3,17 +3,19 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Form, BackgroundTasks, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import select, func
 
 from app.database.core import get_db, SessionLocal
 from app.models.models import Email, Creator, Campaign, EmailLog, Validation
-from app.services import pipeline, sender, creator_search
+from app.services import pipeline, sender, creator_search, locks
 from app.services.orchestrator import orchestrator
 from app.services.categories import CATEGORIES
+from app.validator.core import is_valid_email
 from app.utils.config import settings
+from app.utils.auth import require_auth
 
-router = APIRouter(prefix="/dashboard")
+router = APIRouter(prefix="/dashboard", dependencies=[Depends(require_auth)])
 templates = Jinja2Templates(directory="app/templates")
 
 
@@ -68,8 +70,15 @@ def creator_search_run(platform: str = Form(...), category: str = Form(...),
                         db: Session = Depends(get_db)):
     """Runs several dork queries with a delay between each (to stay under
     DuckDuckGo's rate limit), so this can take up to a minute -- backgrounded
-    rather than holding the request open."""
-    background_tasks.add_task(_run_search_job, platform, category, max_queries)
+    rather than holding the request open. Only one search job (from here or
+    the orchestrator) may run at a time app-wide."""
+    lock = locks.acquire_search_lock()
+    if lock is None:
+        return RedirectResponse(
+            "/dashboard/emails?msg=A search is already running -- try again once it finishes",
+            status_code=303,
+        )
+    background_tasks.add_task(_run_search_job, platform, category, max_queries, lock)
     return RedirectResponse(
         f"/dashboard/emails?msg=Searching {platform} / {category} in the background "
         f"({max_queries} queries, ~{max_queries * 4}s) -- refresh in a bit",
@@ -77,12 +86,16 @@ def creator_search_run(platform: str = Form(...), category: str = Form(...),
     )
 
 
-def _run_search_job(platform: str, category: str, max_queries: int):
+def _run_search_job(platform: str, category: str, max_queries: int, lock):
     db = SessionLocal()
     try:
-        creator_search.search_and_extract_category(db, platform, category, max_queries=max_queries)
+        creator_search.search_and_extract_category(
+            db, platform, category, max_queries=max_queries,
+            on_iteration=lambda: locks.refresh_search_lock(lock),
+        )
     finally:
         db.close()
+        locks.release_search_lock(lock)
 
 
 @router.post("/search-target")
@@ -91,8 +104,15 @@ def creator_search_target(platform: str = Form(...), category: str = Form(...),
     """Runs until `target_valid` validated emails exist in the DB (or a
     safety cap / repeated rate-limiting stops it first). Never sends
     anything -- storage only. Can run for a long time, so it's backgrounded;
-    check progress via /dashboard/emails or /stats."""
-    background_tasks.add_task(_run_search_target_job, platform, category, target_valid)
+    check progress via /dashboard/emails or /stats. Only one search job may
+    run at a time app-wide."""
+    lock = locks.acquire_search_lock()
+    if lock is None:
+        return RedirectResponse(
+            "/dashboard/emails?msg=A search is already running -- try again once it finishes",
+            status_code=303,
+        )
+    background_tasks.add_task(_run_search_target_job, platform, category, target_valid, lock)
     return RedirectResponse(
         f"/dashboard/emails?msg=Running {platform} / {category} in the background until "
         f"{target_valid} validated emails are found -- check back here or on /dashboard for progress",
@@ -100,12 +120,16 @@ def creator_search_target(platform: str = Form(...), category: str = Form(...),
     )
 
 
-def _run_search_target_job(platform: str, category: str, target_valid: int):
+def _run_search_target_job(platform: str, category: str, target_valid: int, lock):
     db = SessionLocal()
     try:
-        creator_search.search_until_target(db, platform, category, target_valid=target_valid)
+        creator_search.search_until_target(
+            db, platform, category, target_valid=target_valid,
+            on_iteration=lambda: locks.refresh_search_lock(lock),
+        )
     finally:
         db.close()
+        locks.release_search_lock(lock)
 
 
 @router.post("/orchestrator/start")
@@ -136,10 +160,18 @@ def approve_email(email_id: int = Form(...), filter: str = Form("all"), db: Sess
 
 @router.post("/emails/add")
 def add_email(address: str = Form(...), db: Session = Depends(get_db)):
-    address = address.strip()
+    address = address.strip().lower()
+    ok, reason = is_valid_email(address)
+    if not ok:
+        msg = f"'{address}' is not a valid email: {reason}"
+        return RedirectResponse(f"/dashboard/emails?msg={msg}", status_code=303)
+
     existing = db.scalar(select(Email).where(Email.address == address))
     if existing is None:
-        db.add(Email(address=address, is_valid=False))
+        email_row = Email(address=address, is_valid=True)
+        db.add(email_row)
+        db.flush()
+        db.add(Validation(email_id=email_row.id, syntax_check=True, smtp_check=True, reason=reason))
         db.commit()
         msg = f"Added {address}"
     else:
@@ -156,10 +188,20 @@ def send_one(email_id: int = Form(...), campaign_id: int = Form(...), filter: st
 
 
 @router.post("/validate")
-def validate(db: Session = Depends(get_db)):
-    result = pipeline.validate_pending(db)
-    msg = f"Validated {result['checked']}: {result['valid']} valid, {result['invalid']} invalid"
-    return RedirectResponse(f"/dashboard?msg={msg}", status_code=303)
+def validate(background_tasks: BackgroundTasks):
+    """Can hammer up to 500 DNS/MX lookups (throttled) -- backgrounded so
+    it doesn't hold the request open, since this is the button most likely
+    to be hit against a large backlog right after a big search run."""
+    background_tasks.add_task(_run_validate_job)
+    return RedirectResponse("/dashboard?msg=Validation started in the background", status_code=303)
+
+
+def _run_validate_job():
+    db = SessionLocal()
+    try:
+        pipeline.validate_pending(db)
+    finally:
+        db.close()
 
 
 @router.get("/emails")
@@ -189,6 +231,14 @@ def emails_list(request: Request, filter: str = "all", msg: str | None = None, d
         sent_ids = select(EmailLog.email_id).where(EmailLog.status == "sent")
         query = query.where(Email.id.in_(sent_ids))
 
+    # Eager-load to avoid N+1: creator is many-to-one (joinedload, single
+    # extra join), email_logs/validations are one-to-many (selectinload,
+    # one extra query per collection instead of one per row).
+    query = query.options(
+        joinedload(Email.creator),
+        selectinload(Email.email_logs),
+        selectinload(Email.validations),
+    )
     records = db.scalars(query.order_by(Email.created_at.desc()).limit(500)).all()
     campaigns = db.scalars(select(Campaign).order_by(Campaign.created_at.desc())).all()
 
@@ -217,7 +267,11 @@ def emails_list(request: Request, filter: str = "all", msg: str | None = None, d
 
 @router.get("/campaigns")
 def campaigns_page(request: Request, msg: str | None = None, db: Session = Depends(get_db)):
-    campaigns = db.scalars(select(Campaign).order_by(Campaign.created_at.desc())).all()
+    campaigns = db.scalars(
+        select(Campaign)
+        .options(selectinload(Campaign.email_logs))
+        .order_by(Campaign.created_at.desc())
+    ).all()
     rows = []
     for c in campaigns:
         sent = sum(1 for l in c.email_logs if l.status == "sent")

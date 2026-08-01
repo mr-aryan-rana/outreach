@@ -7,8 +7,9 @@ from app.database.core import get_db
 from app.models.models import Email, Campaign, EmailLog
 from app.services import pipeline, sender, export as export_service
 from app.utils.config import settings
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 class ExtractTextRequest(BaseModel):
@@ -40,8 +41,21 @@ def extract_url(payload: ExtractUrlRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/validate/run")
-def validate_run(limit: int = 500, db: Session = Depends(get_db)):
-    return pipeline.validate_pending(db, limit=limit)
+def validate_run(background_tasks: BackgroundTasks, limit: int = 500):
+    """Up to `limit` synchronous DNS/MX lookups with a throttling delay
+    between each -- can take a while, so it's backgrounded rather than
+    holding the request open."""
+    background_tasks.add_task(_run_validate_job, limit)
+    return {"status": "started", "limit": limit}
+
+
+def _run_validate_job(limit: int):
+    from app.database.core import SessionLocal
+    db = SessionLocal()
+    try:
+        pipeline.validate_pending(db, limit=limit)
+    finally:
+        db.close()
 
 
 @router.post("/campaigns")

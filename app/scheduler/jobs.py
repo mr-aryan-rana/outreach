@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.database.core import SessionLocal
 from app.models.models import Campaign
 from app.services import sender
+from app.utils.config import settings
 from app.logger import logger
 
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -23,5 +24,9 @@ def _daily_send_job():
 def start_scheduler():
     # Runs once a day; send_campaign internally caps at EMAIL_DAILY_LIMIT
     # sends/day across all campaigns combined, so this is safe to re-trigger.
-    scheduler.add_job(_daily_send_job, "cron", hour=9, minute=0, id="daily_send", replace_existing=True)
+    scheduler.add_job(
+        _daily_send_job, "cron",
+        hour=settings.SCHEDULER_SEND_HOUR, minute=settings.SCHEDULER_SEND_MINUTE,
+        id="daily_send", replace_existing=True,
+    )
     scheduler.start()

@@ -3,19 +3,25 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.database.core import init_db
+from app.database.core import init_db, SessionLocal
 from app.api.routes import router as api_router
 from app.api.dashboard import router as dashboard_router
 from app.scheduler.jobs import start_scheduler
-from app.services.telegram_bot import start_bot as start_telegram_bot
+from app.services import sender
+from app.utils.auth import warn_if_auth_disabled
 from app.logger import logger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    db = SessionLocal()
+    try:
+        sender.sync_send_counter_from_db(db)
+    finally:
+        db.close()
     start_scheduler()
-    start_telegram_bot()
+    warn_if_auth_disabled()
     logger.info("Outreach monolith started")
     yield
 

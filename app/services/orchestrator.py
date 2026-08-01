@@ -6,11 +6,18 @@ from sqlalchemy import select, func
 
 from app.database.core import SessionLocal
 from app.models.models import Email, Campaign, EmailLog
-from app.services import creator_search, sender
+from app.services import creator_search, sender, locks
 from app.utils.config import settings
 from app.logger import logger
 
 MAX_SEARCH_ROUNDS_PER_BATCH = 5
+
+
+def _orchestrator_gap() -> float:
+    """Random gap instead of a fixed one -- a fixed wait between cycles is
+    an easily-fingerprinted automation pattern; jittering it within a range
+    makes the loop's timing look less like a bot on a strict interval."""
+    return random.uniform(settings.ORCHESTRATOR_GAP_MIN_SEC, settings.ORCHESTRATOR_GAP_MAX_SEC)
 
 
 def _unsent_valid_count(db, campaign_id: int, require_approved: bool = False) -> int:
@@ -117,45 +124,61 @@ class Orchestrator:
 
             if self._stop_event.is_set():
                 break
-            self.last_status = f"waiting {settings.ORCHESTRATOR_GAP_SEC:.0f}s before next cycle"
-            self._stop_event.wait(settings.ORCHESTRATOR_GAP_SEC)
+            gap = _orchestrator_gap()
+            self.last_status = f"waiting {gap:.0f}s before next cycle"
+            self._stop_event.wait(gap)
 
         self.running = False
         self.last_status = "stopped"
         logger.info("orchestrator: stopped")
 
     def _fill_batch(self, db):
-        rounds = 0
-        platforms_to_search = ["tiktok", "youtube", "instagram"] if self.platform == "all" else [self.platform]
-        
-        while (not self._stop_event.is_set()
-               and _unsent_valid_count(db, self.campaign_id, require_approved=False) < self.batch_size
-               and rounds < MAX_SEARCH_ROUNDS_PER_BATCH):
-            
-            total_found_this_round = 0
-            needed_total = self.batch_size - _unsent_valid_count(db, self.campaign_id, require_approved=False)
-            
-            for plat in platforms_to_search:
-                if self._stop_event.is_set():
-                    break
-                    
-                needed_for_plat = max(1, needed_total // len(platforms_to_search))
-                
-                result = creator_search.search_until_target(db, plat, self.category, target_valid=needed_for_plat)
-                total_found_this_round += result["valid_found_this_run"]
-                
-                if _unsent_valid_count(db, self.campaign_id, require_approved=False) >= self.batch_size:
-                    break
+        # A manual dashboard search may already be holding the global search
+        # lock -- this is an autonomous scheduling decision, not a user
+        # request, so just skip this cycle's search round instead of
+        # rejecting/blocking; the next loop iteration will try again.
+        lock = locks.acquire_search_lock()
+        if lock is None:
+            logger.info("orchestrator: search lock held elsewhere, skipping search phase this cycle")
+            return
 
-            rounds += 1
-            if total_found_this_round == 0 and not self._stop_event.is_set():
-                self._stop_event.wait(settings.ORCHESTRATOR_GAP_SEC)
-        
-        if self.auto_mode:
-            # Auto-approve all valid unapproved emails
-            from sqlalchemy import update
-            db.execute(update(Email).where(Email.is_valid.is_(True)).where(Email.is_approved.is_(False)).values(is_approved=True))
-            db.commit()
+        try:
+            rounds = 0
+            platforms_to_search = ["tiktok", "youtube", "instagram"] if self.platform == "all" else [self.platform]
+
+            while (not self._stop_event.is_set()
+                   and _unsent_valid_count(db, self.campaign_id, require_approved=False) < self.batch_size
+                   and rounds < MAX_SEARCH_ROUNDS_PER_BATCH):
+
+                total_found_this_round = 0
+                needed_total = self.batch_size - _unsent_valid_count(db, self.campaign_id, require_approved=False)
+
+                for plat in platforms_to_search:
+                    if self._stop_event.is_set():
+                        break
+
+                    needed_for_plat = max(1, needed_total // len(platforms_to_search))
+
+                    result = creator_search.search_until_target(
+                        db, plat, self.category, target_valid=needed_for_plat,
+                        on_iteration=lambda: locks.refresh_search_lock(lock),
+                    )
+                    total_found_this_round += result["valid_found_this_run"]
+
+                    if _unsent_valid_count(db, self.campaign_id, require_approved=False) >= self.batch_size:
+                        break
+
+                rounds += 1
+                if total_found_this_round == 0 and not self._stop_event.is_set():
+                    self._stop_event.wait(_orchestrator_gap())
+
+            if self.auto_mode:
+                # Auto-approve all valid unapproved emails
+                from sqlalchemy import update
+                db.execute(update(Email).where(Email.is_valid.is_(True)).where(Email.is_approved.is_(False)).values(is_approved=True))
+                db.commit()
+        finally:
+            locks.release_search_lock(lock)
 
     def _send_batch(self, db) -> int:
         sent = 0

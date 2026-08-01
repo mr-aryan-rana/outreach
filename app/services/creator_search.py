@@ -1,13 +1,14 @@
 import random
 import re
 import time
+from typing import Callable
 from urllib.parse import urlparse, parse_qs, unquote
 
 import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
-from fp.fp import FreeProxy
+from duckduckgo_search import DDGS
 
 from app.extractor.core import extract_emails_from_text, extract_phones_from_text
 from app.validator.core import is_valid_email
@@ -15,6 +16,7 @@ from app.models.models import Creator, Email, Validation
 from app.services.categories import (
     CATEGORIES, EMAIL_DOMAIN_HINTS, REGION_TERMS, US_STATES, is_family_friendly,
 )
+from app.utils.config import settings
 from app.logger import logger
 
 SITE_MAP = {
@@ -38,90 +40,38 @@ class RateLimitedError(Exception):
     its anti-scraping throttle for this IP, not a structural failure."""
 
 
-from duckduckgo_search import DDGS
+def _query_jitter() -> float:
+    return random.uniform(settings.SEARCH_QUERY_DELAY_MIN_SEC, settings.SEARCH_QUERY_DELAY_MAX_SEC)
 
-import time
 
-import os
+def _rate_limit_backoff() -> float:
+    return random.uniform(settings.SEARCH_RATE_LIMIT_BACKOFF_MIN_SEC, settings.SEARCH_RATE_LIMIT_BACKOFF_MAX_SEC)
+
 
 def search_ddg(query: str, max_results: int = 20) -> list[dict]:
-    """Query Search Engine using ScraperAPI (Google Autoparse) or Yahoo (direct).
+    """Query Search Engine using duckduckgo_search.
     Returns [{url, snippet}, ...]. Snippet contains the indexed preview text
     which often has emails directly."""
     results = []
-    
-    scraper_api_key = os.environ.get("SCRAPER_API_KEY")
-    
-    if scraper_api_key:
-        # Route through ScraperAPI using Google JSON Autoparse
-        url = "http://api.scraperapi.com/"
-        params = {
-            "api_key": scraper_api_key,
-            "url": f"https://www.google.com/search?q={query}",
-            "autoparse": "true"
-        }
-        
-        try:
-            resp = httpx.get(
-                url, 
-                params=params, 
-                timeout=45
-            )
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                organic = data.get("organic_results", [])
-                for hit in organic:
-                    link = hit.get("link", "")
-                    snippet = hit.get("snippet", "")
+
+    try:
+        with DDGS() as ddgs:
+            ddg_results = ddgs.text(query, max_results=max_results)
+            if ddg_results:
+                for hit in ddg_results:
+                    link = hit.get("href", "")
+                    snippet = hit.get("body", "")
                     if link and snippet:
                         results.append({"url": link, "snippet": snippet})
                         if len(results) >= max_results:
                             break
                             
-            elif resp.status_code == 500 or resp.status_code == 429:
-                logger.warning(f"ScraperAPI Rate Limit / Error: {resp.status_code}")
-                
-        except Exception as e:
-            logger.warning(f"ScraperAPI Google search failed: {e}")
-            
-        return results
-
-    # Direct request fallback (Yahoo) - will likely get blocked by Cookie Consent on cloud IPs
-    target_url = "https://search.yahoo.com/search"
-    url = target_url
-    params = {"p": query}
-    timeout = 10
-
-    try:
-        resp = httpx.get(
-            url, 
-            params=params, 
-            timeout=timeout, 
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        )
-        
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for div in soup.select("div.algo-sr"):
-                a_tag = div.select_one("a.ac-algo")
-                snippet_el = div.select_one("div.compText")
-                
-                if a_tag and snippet_el:
-                    href = a_tag.get("href", "")
-                    snippet = snippet_el.get_text(" ", strip=True)
-                    if href and snippet:
-                        results.append({"url": href, "snippet": snippet})
-                        if len(results) >= max_results:
-                            break
-                            
-        elif resp.status_code == 500:
-            # This is Yahoo's rate limit block. Let it fail and let the main loop catch it
-            logger.warning("Yahoo Rate Limit (500 INKApi Error)")
-            
     except Exception as e:
-        logger.warning(f"Yahoo search failed: {e}")
-        
+        logger.warning(f"DuckDuckGo search failed: {e}")
+        error_msg = str(e).lower()
+        if "rate" in error_msg or "202" in error_msg or "timeout" in error_msg:
+            raise RateLimitedError("DDG Rate Limited or Timeout")
+            
     return results
 
 
@@ -151,10 +101,14 @@ def build_dork_queries(platform: str, category: str, max_queries: int = 6) -> li
 
 def build_query_pool(platform: str, categories: list[str]) -> list[str]:
     """Large, deduped, shuffled pool of dork queries crossing every keyword
-    in the given categories with every US state (plus the two generic
-    region terms) and every email-domain hint. Used by the target-driven
-    loop, which needs many distinct queries to keep finding new pages
-    rather than re-hitting the same handful repeatedly."""
+    in the given categories with the region terms (plus every US state, if
+    SEARCH_INCLUDE_STATE_TERMS is on) and every email-domain hint. Used by
+    the target-driven loop, which needs many distinct queries to keep
+    finding new pages rather than re-hitting the same handful repeatedly.
+
+    State terms are opt-in: crossing all 50 states into the pool multiplies
+    query volume ~26x for marginal result diversity, which is what drove
+    the DDG rate limiting in the first place -- see SEARCH_INCLUDE_STATE_TERMS."""
     site = SITE_MAP.get(platform.lower())
     if not site:
         raise ValueError(f"unsupported platform: {platform}")
@@ -166,7 +120,7 @@ def build_query_pool(platform: str, categories: list[str]) -> list[str]:
             raise ValueError(f"unknown category: {cat}")
         keywords.extend(cat_keywords)
 
-    regions = REGION_TERMS + US_STATES
+    regions = REGION_TERMS + US_STATES if settings.SEARCH_INCLUDE_STATE_TERMS else list(REGION_TERMS)
     pool = [
         f'site:{site} "{keyword}" "{region}" "{email_hint}"'
         for keyword in keywords
@@ -188,21 +142,39 @@ def _extract_handle(platform: str, url: str) -> str | None:
 
 def search_and_extract_category(db: Session, platform: str, category: str,
                                  max_results_per_query: int = 20, max_queries: int = 6,
-                                 delay_sec: float = DEFAULT_DELAY_SEC) -> dict:
+                                 delay_sec: float = DEFAULT_DELAY_SEC,
+                                 on_iteration: Callable[[], None] | None = None) -> dict:
     """Run a capped set of dork queries for a creator category, pulling
     emails/phones straight out of DuckDuckGo's indexed snippet text --
     no page fetch needed, since that's already been proven to come back
-    empty for these JS-rendered platforms."""
+    empty for these JS-rendered platforms.
+
+    `on_iteration`, if given, is called once per query loop iteration
+    (callers use it to refresh a held search lock so a long run doesn't
+    lose it to TTL expiry mid-run)."""
     queries = build_dork_queries(platform, category, max_queries)
 
     results_seen, creators_found, emails_found, phones_found = 0, 0, 0, 0
+    consecutive_rate_limits = 0
 
     for i, query in enumerate(queries):
+        if on_iteration:
+            on_iteration()
+
         try:
             hits = search_ddg(query, max_results_per_query)
+            consecutive_rate_limits = 0
         except RateLimitedError as e:
-            logger.warning(f"dork search stopped early (rate-limited): {e}")
-            break
+            consecutive_rate_limits += 1
+            logger.warning(
+                f"dork search rate-limited ({consecutive_rate_limits}/"
+                f"{settings.SEARCH_MAX_CONSECUTIVE_RATE_LIMITS}): {e}"
+            )
+            if consecutive_rate_limits >= settings.SEARCH_MAX_CONSECUTIVE_RATE_LIMITS:
+                logger.warning("dork search: too many consecutive rate limits, stopping")
+                break
+            time.sleep(_rate_limit_backoff())
+            continue
 
         for hit in hits:
             results_seen += 1
@@ -242,7 +214,7 @@ def search_and_extract_category(db: Session, platform: str, category: str,
             db.commit()
 
         if i < len(queries) - 1:
-            time.sleep(delay_sec)
+            time.sleep(delay_sec + _query_jitter())
 
     logger.info(
         f"dork_search platform={platform} category={category}: "
@@ -260,25 +232,19 @@ def search_and_extract_category(db: Session, platform: str, category: str,
     }
 
 
-# Hard safety ceiling on total DDG requests for one target-search run. A
-# literal unbounded loop would keep hammering DuckDuckGo indefinitely if the
-# target is never reached (finite keyword/state/domain pool, or a
-# persistent block) -- this caps the blast radius while still giving the
-# loop plenty of room (50 states x ~4 keywords x 4 domains x several
-# categories is already thousands of queries) to reach a 300-email target.
-MAX_QUERIES_SAFETY_CAP = 800
-MAX_CONSECUTIVE_RATE_LIMITS = 6
-RATE_LIMIT_BACKOFF_SEC = 45.0
-
-
 def search_until_target(db: Session, platform: str, category: str, target_valid: int = 300,
-                         delay_sec: float = DEFAULT_DELAY_SEC) -> dict:
+                         delay_sec: float = DEFAULT_DELAY_SEC,
+                         on_iteration: Callable[[], None] | None = None) -> dict:
     """Keep running dork queries -- cycling through every category if
     category == 'all' -- until `target_valid` validated emails exist in the
     DB, or the query pool / safety cap / repeated rate-limiting forces a
     stop. Every email found is validated (syntax + MX) immediately and only
     counts toward the target once confirmed valid. Never sends anything --
-    storage only, so results just accumulate in the dashboard's email list."""
+    storage only, so results just accumulate in the dashboard's email list.
+
+    `on_iteration`, if given, is called once per query loop iteration
+    (callers use it to refresh a held search lock so a long run doesn't
+    lose it to TTL expiry mid-run)."""
     categories = list(CATEGORIES.keys()) if category == "all" else [category]
     queries = build_query_pool(platform, categories)
 
@@ -291,8 +257,11 @@ def search_until_target(db: Session, platform: str, category: str, target_valid:
     consecutive_rate_limits = 0
 
     for query in queries:
-        if queries_run >= MAX_QUERIES_SAFETY_CAP:
-            logger.warning(f"search_until_target hit safety cap of {MAX_QUERIES_SAFETY_CAP} queries")
+        if on_iteration:
+            on_iteration()
+
+        if queries_run >= settings.SEARCH_MAX_QUERIES_PER_RUN:
+            logger.warning(f"search_until_target hit safety cap of {settings.SEARCH_MAX_QUERIES_PER_RUN} queries")
             break
         if current_valid_count() - starting_valid >= target_valid:
             break
@@ -302,11 +271,13 @@ def search_until_target(db: Session, platform: str, category: str, target_valid:
             consecutive_rate_limits = 0
         except RateLimitedError as e:
             consecutive_rate_limits += 1
-            logger.warning(f"rate-limited ({consecutive_rate_limits}/{MAX_CONSECUTIVE_RATE_LIMITS}): {e}")
-            if consecutive_rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS:
+            logger.warning(
+                f"rate-limited ({consecutive_rate_limits}/{settings.SEARCH_MAX_CONSECUTIVE_RATE_LIMITS}): {e}"
+            )
+            if consecutive_rate_limits >= settings.SEARCH_MAX_CONSECUTIVE_RATE_LIMITS:
                 logger.warning("too many consecutive rate limits, stopping")
                 break
-            time.sleep(RATE_LIMIT_BACKOFF_SEC)
+            time.sleep(_rate_limit_backoff())
             continue
 
         queries_run += 1
@@ -348,7 +319,7 @@ def search_until_target(db: Session, platform: str, category: str, target_valid:
 
             db.commit()
 
-        time.sleep(delay_sec)
+        time.sleep(delay_sec + _query_jitter())
 
     total_valid_now = current_valid_count()
     logger.info(
