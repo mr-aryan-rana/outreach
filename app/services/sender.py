@@ -45,7 +45,19 @@ def send_campaign(db: Session, campaign_id: int) -> dict:
     sent, failed = 0, 0
     for email in targets:
         subject = campaign.subject_template
-        body = campaign.body_template.replace("{{email}}", email.address)
+        
+        # Calculate First Name from creator name if available
+        first_name = "Creator"
+        if email.creator and email.creator.name:
+            # Clean up handles like @john_doe -> John
+            raw_name = email.creator.name.replace('@', '')
+            # Split by common delimiters and take the first part
+            import re
+            parts = re.split(r'[_\.\-\s]', raw_name)
+            if parts and parts[0]:
+                first_name = parts[0].capitalize()
+                
+        body = campaign.body_template.replace("{{email}}", email.address).replace("{{First Name}}", first_name)
         ok, detail = send_email(email.address, subject, body)
 
         db.add(EmailLog(
@@ -82,7 +94,16 @@ def send_single(db: Session, email_id: int, campaign_id: int) -> dict:
         return {"ok": False, "detail": "daily send limit reached"}
 
     subject = campaign.subject_template
-    body = campaign.body_template.replace("{{email}}", email.address)
+    
+    first_name = "Creator"
+    if email.creator and email.creator.name:
+        raw_name = email.creator.name.replace('@', '')
+        import re
+        parts = re.split(r'[_\.\-\s]', raw_name)
+        if parts and parts[0]:
+            first_name = parts[0].capitalize()
+            
+    body = campaign.body_template.replace("{{email}}", email.address).replace("{{First Name}}", first_name)
     ok, detail = send_email(email.address, subject, body)
 
     db.add(EmailLog(
