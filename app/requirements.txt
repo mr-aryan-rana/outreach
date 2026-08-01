@@ -16,3 +16,5 @@ python-multipart
 httpx
 streamlit
 pandas
+free-proxy
+duckduckgo-search
