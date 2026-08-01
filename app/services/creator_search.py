@@ -45,28 +45,53 @@ import time
 import os
 
 def search_ddg(query: str, max_results: int = 20) -> list[dict]:
-    """Query Yahoo Search which
-    handles rate limits much better than DDG directly.
+    """Query Search Engine using ScraperAPI (Google Autoparse) or Yahoo (direct).
     Returns [{url, snippet}, ...]. Snippet contains the indexed preview text
     which often has emails directly."""
     results = []
     
-    target_url = "https://search.yahoo.com/search"
     scraper_api_key = os.environ.get("SCRAPER_API_KEY")
     
     if scraper_api_key:
-        # Route through ScraperAPI
+        # Route through ScraperAPI using Google JSON Autoparse
         url = "http://api.scraperapi.com/"
         params = {
             "api_key": scraper_api_key,
-            "url": f"{target_url}?p={query}"
+            "url": f"https://www.google.com/search?q={query}",
+            "autoparse": "true"
         }
-        timeout = 45 # ScraperAPI can take longer
-    else:
-        # Direct request (will likely get blocked by Yahoo Cookie Consent on cloud IPs)
-        url = target_url
-        params = {"p": query}
-        timeout = 10
+        
+        try:
+            resp = httpx.get(
+                url, 
+                params=params, 
+                timeout=45
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                organic = data.get("organic_results", [])
+                for hit in organic:
+                    link = hit.get("link", "")
+                    snippet = hit.get("snippet", "")
+                    if link and snippet:
+                        results.append({"url": link, "snippet": snippet})
+                        if len(results) >= max_results:
+                            break
+                            
+            elif resp.status_code == 500 or resp.status_code == 429:
+                logger.warning(f"ScraperAPI Rate Limit / Error: {resp.status_code}")
+                
+        except Exception as e:
+            logger.warning(f"ScraperAPI Google search failed: {e}")
+            
+        return results
+
+    # Direct request fallback (Yahoo) - will likely get blocked by Cookie Consent on cloud IPs
+    target_url = "https://search.yahoo.com/search"
+    url = target_url
+    params = {"p": query}
+    timeout = 10
 
     try:
         resp = httpx.get(
