@@ -21,7 +21,7 @@
   {% endif %}
   <table>
     <thead>
-      <tr><th>Email</th><th>Source</th><th>Phone</th><th>Validity</th><th>Send status</th><th>Discovered</th><th>Action</th></tr>
+      <tr><th>Email</th><th>Source</th><th>Phone</th><th>Validity</th><th>Approval</th><th>Send status</th><th>Discovered</th><th>Action</th></tr>
     </thead>
     <tbody>
       {% for row in rows %}
@@ -37,6 +37,13 @@
           {% endif %}
         </td>
         <td>
+          {% if row.is_approved %}
+            <span class="badge valid">approved</span>
+          {% else %}
+            <span class="badge pending">pending</span>
+          {% endif %}
+        </td>
+        <td>
           {% if row.send_status %}
             <span class="badge {{ row.send_status }}">{{ row.send_status }}</span>
           {% else %}
@@ -45,8 +52,15 @@
         </td>
         <td>{{ row.created_at }}</td>
         <td>
+          <form method="post" action="/dashboard/emails/approve" style="display:inline-block; margin-right: 5px; margin-bottom: 5px;">
+            <input type="hidden" name="email_id" value="{{ row.id }}">
+            <input type="hidden" name="filter" value="{{ filter }}">
+            <button type="submit" style="padding: 4px 10px; font-size: 12px; color: white; background-color: {{ '#da3633' if row.is_approved else '#238636' }};">
+              {{ 'Unapprove' if row.is_approved else 'Approve' }}
+            </button>
+          </form>
           {% if row.is_valid and campaigns %}
-          <form method="post" action="/dashboard/emails/send-one" style="flex-direction: row; gap: 6px;">
+          <form method="post" action="/dashboard/emails/send-one" style="display:inline-block; flex-direction: row; gap: 6px;">
             <input type="hidden" name="email_id" value="{{ row.id }}">
             <input type="hidden" name="filter" value="{{ filter }}">
             <select name="campaign_id" style="padding: 4px;">
@@ -66,7 +80,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7" style="color:#9aa0aa;">No emails match this filter yet.</td></tr>
+      <tr><td colspan="8" style="color:#9aa0aa;">No emails match this filter yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>

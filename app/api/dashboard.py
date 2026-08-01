@@ -9,6 +9,7 @@ from sqlalchemy import select, func
 from app.database.core import get_db, SessionLocal
 from app.models.models import Email, Creator, Campaign, EmailLog, Validation
 from app.services import pipeline, sender, creator_search
+from app.services.orchestrator import orchestrator
 from app.services.categories import CATEGORIES
 from app.utils.config import settings
 
@@ -32,13 +33,15 @@ def _stats(db: Session) -> dict:
         "sent_today": sent_today,
         "daily_limit": settings.EMAIL_DAILY_LIMIT,
         "sent_today_pct": pct,
+        "orchestrator_status": orchestrator.status(),
     }
 
 
 @router.get("")
 def overview(request: Request, msg: str | None = None, db: Session = Depends(get_db)):
+    campaigns = db.scalars(select(Campaign).order_by(Campaign.created_at.desc())).all()
     return templates.TemplateResponse(request, "overview.html", {
-        "active": "overview", "stats": _stats(db), "msg": msg, "categories": sorted(CATEGORIES.keys()),
+        "active": "overview", "stats": _stats(db), "msg": msg, "categories": sorted(CATEGORIES.keys()), "campaigns": campaigns
     })
 
 
@@ -103,6 +106,32 @@ def _run_search_target_job(platform: str, category: str, target_valid: int):
         creator_search.search_until_target(db, platform, category, target_valid=target_valid)
     finally:
         db.close()
+
+
+@router.post("/orchestrator/start")
+def orchestrator_start(platform: str = Form(...), category: str = Form(...), campaign_id: int = Form(...), 
+                       auto_mode: bool = Form(...), db: Session = Depends(get_db)):
+    ok, detail = orchestrator.start(platform, category, campaign_id, auto_mode=auto_mode)
+    msg = f"Started in {'Auto' if auto_mode else 'Manual'} mode" if ok else f"Failed to start: {detail}"
+    return RedirectResponse(f"/dashboard?msg={msg}", status_code=303)
+
+
+@router.post("/orchestrator/stop")
+def orchestrator_stop():
+    ok, detail = orchestrator.stop()
+    return RedirectResponse(f"/dashboard?msg={detail}", status_code=303)
+
+
+@router.post("/emails/approve")
+def approve_email(email_id: int = Form(...), filter: str = Form("all"), db: Session = Depends(get_db)):
+    email = db.get(Email, email_id)
+    if email:
+        email.is_approved = not email.is_approved
+        db.commit()
+        msg = f"Email {email.address} approval set to {email.is_approved}"
+    else:
+        msg = "Email not found"
+    return RedirectResponse(f"/dashboard/emails?filter={filter}&msg={msg}", status_code=303)
 
 
 @router.post("/emails/add")
@@ -174,6 +203,7 @@ def emails_list(request: Request, filter: str = "all", msg: str | None = None, d
             "phone": email.creator.phone if email.creator else None,
             "validated": validated,
             "is_valid": email.is_valid,
+            "is_approved": email.is_approved,
             "send_status": last_log.status if last_log else None,
             "last_campaign_id": last_log.campaign_id if last_log else None,
             "created_at": email.created_at.strftime("%Y-%m-%d %H:%M") if email.created_at else "",

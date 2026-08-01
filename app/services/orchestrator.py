@@ -13,11 +13,12 @@ from app.logger import logger
 MAX_SEARCH_ROUNDS_PER_BATCH = 5
 
 
-def _unsent_valid_count(db) -> int:
+def _unsent_valid_count(db, require_approved: bool = False) -> int:
     already_logged = select(EmailLog.email_id).where(EmailLog.status == "sent")
-    return db.scalar(
-        select(func.count(Email.id)).where(Email.is_valid.is_(True)).where(Email.id.not_in(already_logged))
-    ) or 0
+    q = select(func.count(Email.id)).where(Email.is_valid.is_(True)).where(Email.id.not_in(already_logged))
+    if require_approved:
+        q = q.where(Email.is_approved.is_(True))
+    return db.scalar(q) or 0
 
 
 class Orchestrator:
@@ -35,10 +36,11 @@ class Orchestrator:
         self.category = "all"
         self.batch_size = settings.ORCHESTRATOR_BATCH_SIZE
         self.campaign_id: int | None = None
+        self.auto_mode = True
         self.cycles_completed = 0
         self.last_status = "idle"
 
-    def start(self, platform: str, category: str, campaign_id: int, batch_size: int | None = None) -> tuple[bool, str]:
+    def start(self, platform: str, category: str, campaign_id: int, batch_size: int | None = None, auto_mode: bool = True) -> tuple[bool, str]:
         if self.running:
             return False, "already running"
         db = SessionLocal()
@@ -52,6 +54,7 @@ class Orchestrator:
         self.category = category
         self.campaign_id = campaign_id
         self.batch_size = batch_size or settings.ORCHESTRATOR_BATCH_SIZE
+        self.auto_mode = auto_mode
         self.cycles_completed = 0
         self._stop_event.clear()
         self.running = True
@@ -81,6 +84,7 @@ class Orchestrator:
             "category": self.category,
             "campaign_id": self.campaign_id,
             "batch_size": self.batch_size,
+            "auto_mode": self.auto_mode,
             "cycles_completed": self.cycles_completed,
             "unsent_valid": unsent_valid,
             "total_valid": total_valid,
@@ -116,20 +120,30 @@ class Orchestrator:
     def _fill_batch(self, db):
         rounds = 0
         while (not self._stop_event.is_set()
-               and _unsent_valid_count(db) < self.batch_size
+               and _unsent_valid_count(db, require_approved=False) < self.batch_size
                and rounds < MAX_SEARCH_ROUNDS_PER_BATCH):
-            needed = self.batch_size - _unsent_valid_count(db)
+            needed = self.batch_size - _unsent_valid_count(db, require_approved=False)
             result = creator_search.search_until_target(db, self.platform, self.category, target_valid=needed)
             rounds += 1
             if result["valid_found_this_run"] == 0 and not self._stop_event.is_set():
                 self._stop_event.wait(settings.ORCHESTRATOR_GAP_SEC)
+        
+        if self.auto_mode:
+            # Auto-approve all valid unapproved emails
+            from sqlalchemy import update
+            db.execute(update(Email).where(Email.is_valid.is_(True)).where(Email.is_approved.is_(False)).values(is_approved=True))
+            db.commit()
 
     def _send_batch(self, db) -> int:
         sent = 0
         while sent < self.batch_size and not self._stop_event.is_set():
             already_logged = select(EmailLog.email_id).where(EmailLog.campaign_id == self.campaign_id)
             email = db.scalar(
-                select(Email).where(Email.is_valid.is_(True)).where(Email.id.not_in(already_logged)).limit(1)
+                select(Email)
+                .where(Email.is_valid.is_(True))
+                .where(Email.is_approved.is_(True))
+                .where(Email.id.not_in(already_logged))
+                .limit(1)
             )
             if email is None:
                 break

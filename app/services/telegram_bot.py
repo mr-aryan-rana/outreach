@@ -13,10 +13,12 @@ from app.logger import logger
 
 HELP_TEXT = (
     "Outreach bot commands:\n"
-    "/start <campaign_id> [batch_size] [platform] [category] - start the search+send loop\n"
-    "   e.g. /start 1 30 tiktok all\n"
+    "/start <mode> <campaign_id> [batch_size] [platform] [category] - start orchestrator (mode=auto/manual)\n"
+    "   e.g. /start auto 1 30 tiktok all\n"
     "/stop - stop after the current step finishes\n"
-    "/status - current loop status and counts\n"
+    "/status - current loop status and mode\n"
+    "/search <platform> <category> - trigger manual search for 1 run\n"
+    "/approve <email_id> - manually approve an email\n"
     "/list [n] - last n valid emails (default 10)\n"
     "/campaigns - list campaign ids/names\n"
     "/help - this message"
@@ -43,18 +45,25 @@ def _handle_command(text: str) -> str:
     cmd = parts[0].lower()
 
     if cmd == "/start":
-        if len(parts) < 2:
-            return "usage: /start <campaign_id> [batch_size] [platform] [category]"
+        if len(parts) < 3:
+            return "usage: /start <mode> <campaign_id> [batch_size] [platform] [category] (mode=auto/manual)"
+        
+        mode = parts[1].lower()
+        if mode not in ("auto", "manual"):
+            return "mode must be 'auto' or 'manual'"
+        
         try:
-            campaign_id = int(parts[1])
+            campaign_id = int(parts[2])
         except ValueError:
             return "campaign_id must be a number -- see /campaigns"
-        batch_size = int(parts[2]) if len(parts) > 2 else None
-        platform = parts[3] if len(parts) > 3 else "tiktok"
-        category = parts[4] if len(parts) > 4 else "all"
+        
+        batch_size = int(parts[3]) if len(parts) > 3 else None
+        platform = parts[4] if len(parts) > 4 else "tiktok"
+        category = parts[5] if len(parts) > 5 else "all"
         if category != "all" and category not in CATEGORIES:
             return f"unknown category '{category}'. Known: all, {', '.join(sorted(CATEGORIES))}"
-        ok, detail = orchestrator.start(platform, category, campaign_id, batch_size)
+        
+        ok, detail = orchestrator.start(platform, category, campaign_id, batch_size, auto_mode=(mode == "auto"))
         return f"{'Started' if ok else 'Not started'}: {detail}"
 
     if cmd == "/stop":
@@ -63,8 +72,9 @@ def _handle_command(text: str) -> str:
 
     if cmd == "/status":
         s = orchestrator.status()
+        mode_str = "Auto" if s.get("auto_mode") else "Manual"
         return (
-            f"running: {s['running']}\n"
+            f"running: {s['running']} (Mode: {mode_str})\n"
             f"platform/category: {s['platform']} / {s['category']}\n"
             f"campaign_id: {s['campaign_id']}\n"
             f"batch_size: {s['batch_size']}\n"
@@ -97,8 +107,47 @@ def _handle_command(text: str) -> str:
         if not rows:
             return "no campaigns yet -- create one on the dashboard first"
         return "\n".join(f"{c.id}: {c.name}" for c in rows)
+        
+    if cmd == "/search":
+        if len(parts) < 3:
+            return "usage: /search <platform> <category>"
+        platform = parts[1]
+        category = parts[2]
+        
+        if category != "all" and category not in CATEGORIES:
+            return f"unknown category '{category}'"
+            
+        threading.Thread(target=lambda: _run_manual_search(platform, category), daemon=True).start()
+        return f"Triggered manual search in background for {platform}/{category}"
+        
+    if cmd == "/approve":
+        if len(parts) < 2:
+            return "usage: /approve <email_id>"
+        try:
+            email_id = int(parts[1])
+        except ValueError:
+            return "email_id must be a number"
+            
+        db = SessionLocal()
+        try:
+            email = db.get(Email, email_id)
+            if not email:
+                return f"Email #{email_id} not found."
+            email.is_approved = not email.is_approved
+            db.commit()
+            return f"Email {email.address} approval set to {email.is_approved}"
+        finally:
+            db.close()
 
     return HELP_TEXT
+
+def _run_manual_search(platform: str, category: str):
+    from app.services import creator_search
+    db = SessionLocal()
+    try:
+        creator_search.search_and_extract_category(db, platform, category, max_queries=6)
+    finally:
+        db.close()
 
 
 def _poll_loop():

@@ -10,6 +10,57 @@
     <div class="progress"><div class="progress-bar" style="width: {{ stats.sent_today_pct }}%"></div></div>
   </div>
 </div>
+<div class="panel" style="background-color: #1a1e23; border: 1px solid #3d444d;">
+  <h2>Service Control Panel</h2>
+  <div style="display: flex; justify-content: space-between; align-items: center;">
+    <div>
+      <p style="margin: 0; color: #9aa0aa;">Status: 
+        <strong style="color: {% if stats.orchestrator_status.running %}#2ea043{% else %}#f85149{% endif %};">
+          {{ "Running" if stats.orchestrator_status.running else "Stopped" }}
+        </strong>
+        {% if stats.orchestrator_status.running %}
+        | Mode: <strong style="color: #58a6ff;">{{ "Auto" if stats.orchestrator_status.auto_mode else "Manual" }}</strong>
+        | Phase: {{ stats.orchestrator_status.last_status }}
+        {% endif %}
+      </p>
+      {% if stats.orchestrator_status.running %}
+      <p style="margin: 4px 0 0 0; font-size: 13px; color: #9aa0aa;">
+        Campaign #{{ stats.orchestrator_status.campaign_id }} | {{ stats.orchestrator_status.platform }} ({{ stats.orchestrator_status.category }})
+      </p>
+      {% endif %}
+    </div>
+    
+    <div style="display: flex; gap: 10px;">
+      {% if stats.orchestrator_status.running %}
+        <form method="post" action="/dashboard/orchestrator/stop">
+          <button type="submit" style="background-color: #da3633; color: white;">Stop Service</button>
+        </form>
+      {% else %}
+        <form method="post" action="/dashboard/orchestrator/start" style="display: flex; gap: 10px; align-items: center;">
+          <select name="campaign_id" required style="max-width: 150px;">
+            <option value="" disabled selected>Select Campaign</option>
+            {% for c in campaigns %}
+            <option value="{{ c.id }}">#{{ c.id }} - {{ c.name }}</option>
+            {% endfor %}
+          </select>
+          <select name="platform" style="max-width: 120px;">
+            <option value="tiktok">TikTok</option>
+            <option value="instagram">Instagram</option>
+            <option value="youtube">YouTube</option>
+          </select>
+          <select name="category" style="max-width: 120px;">
+            <option value="all">All</option>
+            {% for c in categories %}
+            <option value="{{ c }}">{{ c.replace('_', ' ').title() }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" name="auto_mode" value="true" style="background-color: #238636; color: white;">Start Auto</button>
+          <button type="submit" name="auto_mode" value="false" style="background-color: #1f6feb; color: white;">Start Manual</button>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+</div>
 
 <div class="panel">
   <h2>Creator search (TikTok / Instagram / YouTube via DuckDuckGo)</h2>

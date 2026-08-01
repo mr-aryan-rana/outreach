@@ -20,6 +20,7 @@ class Email(Base):
     address = Column(String, unique=True, index=True)
     creator_id = Column(Integer, ForeignKey("creators.id"))
     is_valid = Column(Boolean, default=False)
+    is_approved = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     creator = relationship("Creator", back_populates="emails")
