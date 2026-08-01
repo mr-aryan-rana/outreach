@@ -119,13 +119,29 @@ class Orchestrator:
 
     def _fill_batch(self, db):
         rounds = 0
+        platforms_to_search = ["tiktok", "youtube", "instagram"] if self.platform == "all" else [self.platform]
+        
         while (not self._stop_event.is_set()
                and _unsent_valid_count(db, require_approved=False) < self.batch_size
                and rounds < MAX_SEARCH_ROUNDS_PER_BATCH):
-            needed = self.batch_size - _unsent_valid_count(db, require_approved=False)
-            result = creator_search.search_until_target(db, self.platform, self.category, target_valid=needed)
+            
+            total_found_this_round = 0
+            needed_total = self.batch_size - _unsent_valid_count(db, require_approved=False)
+            
+            for plat in platforms_to_search:
+                if self._stop_event.is_set():
+                    break
+                    
+                needed_for_plat = max(1, needed_total // len(platforms_to_search))
+                
+                result = creator_search.search_until_target(db, plat, self.category, target_valid=needed_for_plat)
+                total_found_this_round += result["valid_found_this_run"]
+                
+                if _unsent_valid_count(db, require_approved=False) >= self.batch_size:
+                    break
+
             rounds += 1
-            if result["valid_found_this_run"] == 0 and not self._stop_event.is_set():
+            if total_found_this_round == 0 and not self._stop_event.is_set():
                 self._stop_event.wait(settings.ORCHESTRATOR_GAP_SEC)
         
         if self.auto_mode:

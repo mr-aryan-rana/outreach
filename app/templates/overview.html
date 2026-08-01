@@ -12,7 +12,7 @@
 </div>
 <div class="panel" style="background-color: #1a1e23; border: 1px solid #3d444d;">
   <h2>Service Control Panel</h2>
-  <div style="display: flex; justify-content: space-between; align-items: center;">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
     <div>
       <p style="margin: 0; color: #9aa0aa;">Status: 
         <strong style="color: {% if stats.orchestrator_status.running %}#2ea043{% else %}#f85149{% endif %};">
@@ -30,32 +30,33 @@
       {% endif %}
     </div>
     
-    <div style="display: flex; gap: 10px;">
+    <div style="display: flex; align-items: center;">
       {% if stats.orchestrator_status.running %}
-        <form method="post" action="/dashboard/orchestrator/stop">
-          <button type="submit" style="background-color: #da3633; color: white;">Stop Service</button>
+        <form method="post" action="/dashboard/orchestrator/stop" style="margin: 0;">
+          <button type="submit" style="background-color: #da3633; color: white; margin: 0;">Stop Service</button>
         </form>
       {% else %}
-        <form method="post" action="/dashboard/orchestrator/start" style="display: flex; gap: 10px; align-items: center;">
-          <select name="campaign_id" required style="max-width: 150px;">
+        <form method="post" action="/dashboard/orchestrator/start" style="display: flex; flex-direction: row; gap: 10px; align-items: center; margin: 0;">
+          <select name="campaign_id" required style="width: auto;">
             <option value="" disabled selected>Select Campaign</option>
             {% for c in campaigns %}
             <option value="{{ c.id }}">#{{ c.id }} - {{ c.name }}</option>
             {% endfor %}
           </select>
-          <select name="platform" style="max-width: 120px;">
+          <select name="platform" style="width: auto;">
+            <option value="all">All Platforms</option>
             <option value="tiktok">TikTok</option>
             <option value="instagram">Instagram</option>
             <option value="youtube">YouTube</option>
           </select>
-          <select name="category" style="max-width: 120px;">
-            <option value="all">All</option>
+          <select name="category" style="width: auto;">
+            <option value="all">All Categories</option>
             {% for c in categories %}
             <option value="{{ c }}">{{ c.replace('_', ' ').title() }}</option>
             {% endfor %}
           </select>
-          <button type="submit" name="auto_mode" value="true" style="background-color: #238636; color: white;">Start Auto</button>
-          <button type="submit" name="auto_mode" value="false" style="background-color: #1f6feb; color: white;">Start Manual</button>
+          <button type="submit" name="auto_mode" value="true" style="background-color: #238636; color: white; margin: 0;">Start Auto</button>
+          <button type="submit" name="auto_mode" value="false" style="background-color: #1f6feb; color: white; margin: 0;">Start Manual</button>
         </form>
       {% endif %}
     </div>
