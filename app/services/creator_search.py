@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from sqlalchemy import select, func
 import urllib.parse
-from playwright.sync_api import sync_playwright
 
 from app.extractor.core import extract_emails_from_text, extract_phones_from_text
 from app.validator.core import is_valid_email
