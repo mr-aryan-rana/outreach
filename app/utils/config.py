@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     # Sending policy
     EMAIL_DAILY_LIMIT: int = 200
-    EMAIL_SEND_DELAY_MIN_SEC: float = 5.0
-    EMAIL_SEND_DELAY_MAX_SEC: float = 15.0
+    EMAIL_SEND_DELAY_MIN_SEC: float = 30.0
+    EMAIL_SEND_DELAY_MAX_SEC: float = 90.0
     # Validation
     VALIDATE_DELIVERABILITY: bool = True
     # Daily scheduled send (UTC)
