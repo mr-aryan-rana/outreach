@@ -25,10 +25,10 @@ class Settings(BaseSettings):
     SCHEDULER_SEND_MINUTE: int = 0
     # Orchestrator (search-then-send loop)
     ORCHESTRATOR_BATCH_SIZE: int = 30
-    ORCHESTRATOR_GAP_MIN_SEC: float = 90.0
-    ORCHESTRATOR_GAP_MAX_SEC: float = 150.0
-    # Search rate limiting (DuckDuckGo dork queries)
-    SEARCH_MAX_QUERIES_PER_RUN: int = 800
+    ORCHESTRATOR_GAP_MIN_SEC: float = 1800.0  # 30 minutes
+    ORCHESTRATOR_GAP_MAX_SEC: float = 1860.0  # 31 minutes (slight jitter)
+    # Search rate limiting (DuckDuckGo dork queries / Serper API)
+    SEARCH_MAX_QUERIES_PER_RUN: int = 222
     SEARCH_MAX_CONSECUTIVE_RATE_LIMITS: int = 6
     SEARCH_RATE_LIMIT_BACKOFF_MIN_SEC: float = 30.0
     SEARCH_RATE_LIMIT_BACKOFF_MAX_SEC: float = 60.0
@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # DASHBOARD_USER/DASHBOARD_PASSWORD keys already present in .env.
     DASHBOARD_USER: str = "admin"
     DASHBOARD_PASSWORD: str = ""
+    # Google Custom Search API
+    GOOGLE_API_KEY: Optional[str] = None
+    GOOGLE_CSE_ID: Optional[str] = None
+    SERPER_KEY: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=str(_ENV_FILE), extra="ignore")
 

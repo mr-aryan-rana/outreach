@@ -1,3 +1,4 @@
+import json
 import random
 import re
 import time
@@ -8,7 +9,9 @@ import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
-from duckduckgo_search import DDGS
+from sqlalchemy import select, func
+import urllib.parse
+from playwright.sync_api import sync_playwright
 
 from app.extractor.core import extract_emails_from_text, extract_phones_from_text
 from app.validator.core import is_valid_email
@@ -21,23 +24,22 @@ from app.logger import logger
 
 SITE_MAP = {
     "instagram": "instagram.com",
-    "youtube": "youtube.com",
     "tiktok": "tiktok.com",
 }
 
 HANDLE_PATTERNS = {
     "tiktok": re.compile(r"tiktok\.com/(@[a-zA-Z0-9_.\-]+)"),
     "instagram": re.compile(r"instagram\.com/([a-zA-Z0-9_.\-]+)/?"),
-    "youtube": re.compile(r"youtube\.com/(@[a-zA-Z0-9_.\-]+)"),
 }
 
 DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
 DEFAULT_DELAY_SEC = 3.0
 
 
+DEFAULT_DELAY_SEC = 3.0
+
 class RateLimitedError(Exception):
-    """DuckDuckGo's HTML endpoint returned a non-200 (typically 202) --
-    its anti-scraping throttle for this IP, not a structural failure."""
+    """Playwright hit DDG Rate Limit or CAPTCHA."""
 
 
 def _query_jitter() -> float:
@@ -48,29 +50,41 @@ def _rate_limit_backoff() -> float:
     return random.uniform(settings.SEARCH_RATE_LIMIT_BACKOFF_MIN_SEC, settings.SEARCH_RATE_LIMIT_BACKOFF_MAX_SEC)
 
 
-def search_ddg(query: str, max_results: int = 20) -> list[dict]:
-    """Query Search Engine using duckduckgo_search.
-    Returns [{url, snippet}, ...]. Snippet contains the indexed preview text
-    which often has emails directly."""
+def search_serper(query: str, max_results: int = 10) -> list[dict]:
+    """Query Google using the Serper API."""
+    if not settings.SERPER_KEY:
+        logger.warning("SERPER_KEY is not set. Cannot perform search.")
+        return []
+        
+    url = "https://google.serper.dev/search"
+    payload = json.dumps({
+        "q": query,
+        "num": max_results,
+        "gl": "us"
+    })
+    headers = {
+        'X-API-KEY': settings.SERPER_KEY,
+        'Content-Type': 'application/json'
+    }
+    
     results = []
-
     try:
-        with DDGS() as ddgs:
-            ddg_results = ddgs.text(query, max_results=max_results)
-            if ddg_results:
-                for hit in ddg_results:
-                    link = hit.get("href", "")
-                    snippet = hit.get("body", "")
-                    if link and snippet:
-                        results.append({"url": link, "snippet": snippet})
-                        if len(results) >= max_results:
-                            break
-                            
+        response = httpx.post(url, headers=headers, data=payload, timeout=15.0)
+        
+        if response.status_code == 429:
+            raise RateLimitedError("Serper hit Rate Limit (429)")
+        response.raise_for_status()
+        
+        data = response.json()
+        for item in data.get("organic", [])[:max_results]:
+            link = item.get("link")
+            snippet = item.get("snippet", "")
+            if link and snippet:
+                results.append({"url": link, "snippet": snippet})
+    except RateLimitedError:
+        raise
     except Exception as e:
-        logger.warning(f"DuckDuckGo search failed: {e}")
-        error_msg = str(e).lower()
-        if "rate" in error_msg or "202" in error_msg or "timeout" in error_msg:
-            raise RateLimitedError("DDG Rate Limited or Timeout")
+        logger.warning(f"Serper search failed: {e}")
             
     return results
 
@@ -162,7 +176,7 @@ def search_and_extract_category(db: Session, platform: str, category: str,
             on_iteration()
 
         try:
-            hits = search_ddg(query, max_results_per_query)
+            hits = search_serper(query, max_results_per_query)
             consecutive_rate_limits = 0
         except RateLimitedError as e:
             consecutive_rate_limits += 1
@@ -267,7 +281,7 @@ def search_until_target(db: Session, platform: str, category: str, target_valid:
             break
 
         try:
-            hits = search_ddg(query, max_results=20)
+            hits = search_serper(query, max_results=10)
             consecutive_rate_limits = 0
         except RateLimitedError as e:
             consecutive_rate_limits += 1

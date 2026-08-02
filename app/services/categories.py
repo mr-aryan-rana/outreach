@@ -3,17 +3,15 @@
 # their own bio text (not generic labels) -- that's what a snippet match needs.
 CATEGORIES: dict[str, list[str]] = {
     "couple_relationship": ["couple", "husband and wife", "boyfriend and girlfriend", "couple vlog"],
-    "fitness_gym": ["fitness coach", "personal trainer", "gym", "workout"],
+
     "beauty_makeup": ["makeup artist", "beauty influencer", "skincare"],
     "fashion_style": ["fashion blogger", "style influencer", "outfit"],
     "food_cooking": ["food blogger", "home cook", "recipe creator"],
-    "travel": ["travel blogger", "digital nomad", "travel vlog"],
-    "gaming": ["gamer", "streamer", "gaming content"],
     "comedy_entertainment": ["comedian", "sketch comedy", "entertainer"],
     "family_parenting": ["mom blogger", "dad blogger", "parenting", "family vlog"],
     "pets_animals": ["dog mom", "pet influencer", "animal lover"],
     "tech_gadgets": ["tech reviewer", "gadget review", "tech creator"],
-    "finance_business": ["entrepreneur", "small business owner", "finance creator"],
+
     "education_study": ["study creator", "educator", "student vlog"],
     "music": ["musician", "singer songwriter", "music creator"],
     "art_design": ["artist", "illustrator", "designer"],

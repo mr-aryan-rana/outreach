@@ -144,7 +144,7 @@ class Orchestrator:
 
         try:
             rounds = 0
-            platforms_to_search = ["tiktok", "youtube", "instagram"] if self.platform == "all" else [self.platform]
+            platforms_to_search = ["tiktok", "instagram"] if self.platform == "all" else [self.platform]
 
             while (not self._stop_event.is_set()
                    and _unsent_valid_count(db, self.campaign_id, require_approved=False) < self.batch_size
@@ -170,7 +170,7 @@ class Orchestrator:
 
                 rounds += 1
                 if total_found_this_round == 0 and not self._stop_event.is_set():
-                    self._stop_event.wait(_orchestrator_gap())
+                    self._stop_event.wait(60.0)  # Wait 60s before retry, instead of full batch gap
 
             if self.auto_mode:
                 # Auto-approve all valid unapproved emails
