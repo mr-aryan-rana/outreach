@@ -11,6 +11,20 @@ from app.mailer.core import send_email
 from app.database.redis_core import redis_client
 from app.utils.config import settings
 from app.logger import logger
+import re
+
+def parse_spintax(text: str) -> str:
+    """Parse spintax like {Option A|Option B|Option C} by randomly choosing one."""
+    if not text:
+        return text
+    pattern = re.compile(r'\{([^{}]*)\}')
+    while True:
+        match = pattern.search(text)
+        if not match:
+            break
+        choices = match.group(1).split('|')
+        text = text[:match.start()] + random.choice(choices) + text[match.end():]
+    return text
 
 
 def _sent_today_count(db: Session) -> int:
@@ -116,7 +130,7 @@ def send_campaign(db: Session, campaign_id: int) -> dict:
             logger.info("daily send limit reached mid-run (concurrent trigger consumed remaining quota)")
             break
 
-        subject = campaign.subject_template
+        subject = parse_spintax(campaign.subject_template)
 
         # Calculate First Name from creator name if available
         first_name = "Creator"
@@ -129,7 +143,7 @@ def send_campaign(db: Session, campaign_id: int) -> dict:
             if parts and parts[0]:
                 first_name = parts[0].capitalize()
 
-        body = campaign.body_template.replace("{{email}}", email.address).replace("{{First Name}}", first_name)
+        body = parse_spintax(campaign.body_template).replace("{{email}}", email.address).replace("{{First Name}}", first_name)
         ok, detail = send_email(email.address, subject, body)
         if not ok:
             _release_send_slot()
@@ -167,7 +181,7 @@ def send_single(db: Session, email_id: int, campaign_id: int) -> dict:
     if not _reserve_send_slot():
         return {"ok": False, "detail": "daily send limit reached"}
 
-    subject = campaign.subject_template
+    subject = parse_spintax(campaign.subject_template)
 
     first_name = "Creator"
     if email.creator and email.creator.name:
@@ -177,7 +191,7 @@ def send_single(db: Session, email_id: int, campaign_id: int) -> dict:
         if parts and parts[0]:
             first_name = parts[0].capitalize()
 
-    body = campaign.body_template.replace("{{email}}", email.address).replace("{{First Name}}", first_name)
+    body = parse_spintax(campaign.body_template).replace("{{email}}", email.address).replace("{{First Name}}", first_name)
     ok, detail = send_email(email.address, subject, body)
     if not ok:
         _release_send_slot()
