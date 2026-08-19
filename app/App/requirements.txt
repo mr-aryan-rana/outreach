@@ -1,0 +1,19 @@
+# =============================================================================
+# 📦 Outreach Main Web & Pipeline Dependencies (Render Production)
+# =============================================================================
+
+# FastAPI & Uvicorn Server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+
+# Database & Cache Drivers
+psycopg2-binary>=2.9.9
+redis>=5.0.1
+
+# Mailer & DNS Verification
+dnspython>=2.6.1
+
+# Environment & Utilities
+python-dotenv>=1.0.1
+requests>=2.31.0
